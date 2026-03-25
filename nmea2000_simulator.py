@@ -175,18 +175,21 @@ def build_iso_request(requested_pgn: int) -> bytes:
     return bytes((requested_pgn & 0xFF, (requested_pgn >> 8) & 0xFF, (requested_pgn >> 16) & 0xFF)) + bytes((0xFF,) * 5)
 
 
-def build_engine_rapid(engine_instance: int, engine_speed_rpm: float, engine_boost_kpa: float, trim_percent: float) -> bytes:
+def build_engine_rapid(engine_instance: int, engine_speed_rpm: float, engine_boost_bar: float, trim_percent: float) -> bytes:
+    # PGN 127488 per NMEA2000: speed=0.25 rpm/bit, boost=100 Pa/bit, trim=1 %/bit (int8)
     speed_raw = clamp_u16(engine_speed_rpm, 0.25)
-    boost_raw = max(0, min(250, int(round(engine_boost_kpa))))
-    trim_raw = max(0, min(250, int(round(trim_percent / 0.4))))
+    boost_pa = engine_boost_bar * 100000.0
+    boost_raw = clamp_u16(boost_pa, 100.0)
+    trim_raw = max(-125, min(125, int(round(trim_percent))))
+    trim_encoded = trim_raw & 0xFF
     return bytes(
         (
             engine_instance & 0xFF,
-            boost_raw,
-            0xFF,
             speed_raw & 0xFF,
             (speed_raw >> 8) & 0xFF,
-            trim_raw,
+            boost_raw & 0xFF,
+            (boost_raw >> 8) & 0xFF,
+            trim_encoded,
             0xFF,
             0xFF,
         )
@@ -195,27 +198,31 @@ def build_engine_rapid(engine_instance: int, engine_speed_rpm: float, engine_boo
 
 def build_engine_dynamic(
     engine_instance: int,
-    oil_pressure_kpa: float,
+    oil_pressure_bar: float,
     oil_temp_c: float,
     coolant_temp_c: float,
     alternator_voltage_v: float,
     fuel_rate_lph: float,
     total_engine_hours_h: float,
-    coolant_pressure_kpa: float,
-    fuel_pressure_kpa: float,
+    coolant_pressure_bar: float,
+    fuel_pressure_bar: float,
     engine_load_percent: float,
     engine_torque_percent: float,
 ) -> bytes:
-    oil_p_raw = clamp_u16(oil_pressure_kpa, 1.0)
+    # PGN 127489 per NMEA2000:
+    # Oil/Coolant pressure: 100 Pa/bit, Fuel pressure: 1000 Pa/bit
+    # Oil temp: 0.1 K/bit, Coolant temp: 0.01 K/bit
+    # Alternator: 0.01 V/bit, Fuel rate: 0.1 L/h/bit
+    oil_p_raw = clamp_u16(oil_pressure_bar * 100000.0, 100.0)
     oil_t_raw = clamp_u16(oil_temp_c + 273.15, 0.1)
-    coolant_t_raw = clamp_u16(coolant_temp_c + 273.15, 0.1)
+    coolant_t_raw = clamp_u16(coolant_temp_c + 273.15, 0.01)
     alt_v_raw = clamp_u16(alternator_voltage_v, 0.01)
     fuel_rate_raw = clamp_u16(fuel_rate_lph, 0.1)
     hours_raw = max(0, min(0xFFFFFFFF, int(round(total_engine_hours_h))))
-    coolant_p_raw = clamp_u16(coolant_pressure_kpa, 1.0)
-    fuel_p_raw = clamp_u16(fuel_pressure_kpa, 1.0)
-    load_raw = max(0, min(250, int(round(engine_load_percent / 0.4))))
-    torque_raw = max(0, min(250, int(round(engine_torque_percent / 0.4))))
+    coolant_p_raw = clamp_u16(coolant_pressure_bar * 100000.0, 100.0)
+    fuel_p_raw = clamp_u16(fuel_pressure_bar * 100000.0, 1000.0)
+    load_raw = max(-125, min(125, int(round(engine_load_percent)))) & 0xFF
+    torque_raw = max(-125, min(125, int(round(engine_torque_percent)))) & 0xFF
 
     data = bytearray()
     data.extend((engine_instance & 0xFF,))
@@ -227,7 +234,7 @@ def build_engine_dynamic(
     data.extend(hours_raw.to_bytes(4, byteorder="little", signed=False))
     data.extend(le_u16(coolant_p_raw))
     data.extend(le_u16(fuel_p_raw))
-    data.extend((load_raw, torque_raw, 0xFF, 0xFF))
+    data.extend((0xFF, 0xFF, 0xFF, 0xFF, load_raw, torque_raw))
     return bytes(data)
 
 
@@ -319,10 +326,10 @@ class SimulatorApp:
 
         row = 4
         self.engine_speed_rpm = self._add_field(main, row, "Engine speed rpm", "750")
-        self.engine_boost_kpa = self._add_field(main, row, "Boost pressure kPa", "100", col=2)
+        self.engine_boost_bar = self._add_field(main, row, "Boost pressure bar", "1.0", col=2)
         row += 1
         self.trim_percent = self._add_field(main, row, "Engine trim %", "0")
-        self.oil_pressure_kpa = self._add_field(main, row, "Oil pressure kPa", "350", col=2)
+        self.oil_pressure_bar = self._add_field(main, row, "Oil pressure bar", "3.5", col=2)
         row += 1
         self.oil_temp_c = self._add_field(main, row, "Oil temp °C", "85")
         self.coolant_temp_c = self._add_field(main, row, "Coolant temp °C", "78", col=2)
@@ -331,9 +338,9 @@ class SimulatorApp:
         self.fuel_rate_lph = self._add_field(main, row, "Fuel rate L/h", "12", col=2)
         row += 1
         self.engine_hours_h = self._add_field(main, row, "Engine hours", "500")
-        self.coolant_pressure_kpa = self._add_field(main, row, "Coolant pressure kPa", "120", col=2)
+        self.coolant_pressure_bar = self._add_field(main, row, "Coolant pressure bar", "1.2", col=2)
         row += 1
-        self.fuel_pressure_kpa = self._add_field(main, row, "Fuel pressure kPa", "300")
+        self.fuel_pressure_psi = self._add_field(main, row, "Fuel pressure PSI", "43.5")
         self.engine_load_percent = self._add_field(main, row, "Engine load %", "35", col=2)
         row += 1
         self.engine_torque_percent = self._add_field(main, row, "Engine torque %", "42")
@@ -544,7 +551,7 @@ class SimulatorApp:
                     build_engine_rapid(
                         engine_instance,
                         self._as_float(self.engine_speed_rpm.get(), 0.0),
-                        self._as_float(self.engine_boost_kpa.get(), 100.0),
+                        self._as_float(self.engine_boost_bar.get(), 1.0),
                         self._as_float(self.trim_percent.get(), 0.0),
                     ),
                     2,
@@ -557,14 +564,14 @@ class SimulatorApp:
                     PGN_ENGINE_DYNAMIC,
                     build_engine_dynamic(
                         engine_instance,
-                        self._as_float(self.oil_pressure_kpa.get(), 0.0),
+                        self._as_float(self.oil_pressure_bar.get(), 0.0),
                         self._as_float(self.oil_temp_c.get(), 0.0),
                         self._as_float(self.coolant_temp_c.get(), 0.0),
                         self._as_float(self.alternator_v.get(), 0.0),
                         self._as_float(self.fuel_rate_lph.get(), 0.0),
                         self._as_float(self.engine_hours_h.get(), 0.0),
-                        self._as_float(self.coolant_pressure_kpa.get(), 0.0),
-                        self._as_float(self.fuel_pressure_kpa.get(), 0.0),
+                        self._as_float(self.coolant_pressure_bar.get(), 0.0),
+                        self._as_float(self.fuel_pressure_psi.get(), 0.0) * 0.0689476,
                         self._as_float(self.engine_load_percent.get(), 0.0),
                         self._as_float(self.engine_torque_percent.get(), 0.0),
                     ),
