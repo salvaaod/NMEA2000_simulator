@@ -20,6 +20,8 @@ PGN_PRODUCT_INFO = 126996
 PGN_HEARTBEAT = 126993
 PGN_ENGINE_RAPID = 127488
 PGN_ENGINE_DYNAMIC = 127489
+PGN_GROUP_FUNCTION = 126208
+PGN_BINARY_SWITCH_BANK_STATUS = 127501
 
 GLOBAL_DESTINATION = 0xFF
 DEFAULT_PRIORITY = 6
@@ -265,6 +267,45 @@ def build_heartbeat_payload(interval_ms: int, sequence_counter: int) -> bytes:
     )
 
 
+def _pack_2bit_values(values: list[int], output_len: int) -> bytes:
+    packed = bytearray((0x00,) * output_len)
+    for index, value in enumerate(values):
+        bit_pos = index * 2
+        byte_index = bit_pos // 8
+        shift = bit_pos % 8
+        if byte_index >= output_len:
+            break
+        packed[byte_index] |= (value & 0x03) << shift
+    return bytes(packed)
+
+
+def build_binary_switch_bank_status(bank_instance: int, switch_states: list[bool]) -> bytes:
+    # PGN 127501: 1 byte bank instance + 28 x 2-bit switch status fields.
+    # Status encoding used here: 0=Off, 1=On, 3=Unavailable.
+    states_2bit = [(1 if state else 0) for state in switch_states[:12]]
+    if len(states_2bit) < 28:
+        states_2bit.extend([3] * (28 - len(states_2bit)))
+    packed_states = _pack_2bit_values(states_2bit[:28], 7)
+    return bytes((bank_instance & 0xFF,)) + packed_states
+
+
+def build_group_function_binary_switch_command(bank_instance: int, switch_number: int, state_on: bool) -> bytes:
+    # Simplified PGN 126208 (Command Group Function) command payload:
+    # [FunctionCode=1, PGN(127501), NumberOfParams=3, BankInstance, SwitchNumber(1..12), Status(0/1)]
+    return bytes(
+        (
+            1,
+            PGN_BINARY_SWITCH_BANK_STATUS & 0xFF,
+            (PGN_BINARY_SWITCH_BANK_STATUS >> 8) & 0xFF,
+            (PGN_BINARY_SWITCH_BANK_STATUS >> 16) & 0xFF,
+            3,
+            bank_instance & 0xFF,
+            max(1, min(12, switch_number)) & 0xFF,
+            1 if state_on else 0,
+        )
+    )
+
+
 def split_fast_packet(payload: bytes, sequence_id: int) -> list[bytes]:
     if len(payload) <= 8:
         return [payload]
@@ -298,6 +339,8 @@ class SimulatorApp:
         self.is_connected = False
         self.fast_packet_sequence = 0
         self.heartbeat_sequence = 0
+        self.binary_switch_states = [False] * 12
+        self.switch_buttons: list[ttk.Button] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -382,12 +425,33 @@ class SimulatorApp:
         self.heartbeat_enabled = tk.BooleanVar(value=True)
         self.engine_rapid_enabled = tk.BooleanVar(value=True)
         self.engine_dynamic_enabled = tk.BooleanVar(value=True)
+        self.binary_switch_status_enabled = tk.BooleanVar(value=True)
         ttk.Checkbutton(enabled, text="ISO Address Claim", variable=self.address_claim_enabled).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(enabled, text="ISO Request", variable=self.iso_request_enabled).grid(row=0, column=1, sticky="w")
         ttk.Checkbutton(enabled, text="Product Info", variable=self.product_info_enabled).grid(row=1, column=0, sticky="w")
         ttk.Checkbutton(enabled, text="Heartbeat", variable=self.heartbeat_enabled).grid(row=1, column=1, sticky="w")
         ttk.Checkbutton(enabled, text="Engine Rapid PGN 127488", variable=self.engine_rapid_enabled).grid(row=2, column=0, sticky="w")
         ttk.Checkbutton(enabled, text="Engine Dynamic PGN 127489", variable=self.engine_dynamic_enabled).grid(row=2, column=1, sticky="w")
+        ttk.Checkbutton(
+            enabled, text="Binary Switch Bank Status PGN 127501", variable=self.binary_switch_status_enabled
+        ).grid(row=3, column=0, columnspan=2, sticky="w")
+        row += 1
+
+        switch_frame = ttk.LabelFrame(main, text="Binary Switch Bank (1-12 pushbuttons)", padding=8)
+        switch_frame.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(4, 6))
+        ttk.Label(switch_frame, text="Bank instance").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self.binary_switch_bank_instance = tk.StringVar(value="52")
+        ttk.Entry(switch_frame, textvariable=self.binary_switch_bank_instance, width=8).grid(row=0, column=1, sticky="w")
+        ttk.Label(switch_frame, text="Write with PGN 126208 on button press").grid(row=0, column=2, columnspan=4, sticky="w")
+        for index in range(12):
+            button = ttk.Button(
+                switch_frame,
+                text=f"SW {index + 1}: OFF",
+                command=lambda switch_no=index + 1: self.on_switch_pushbutton(switch_no),
+                width=12,
+            )
+            button.grid(row=1 + (index // 6), column=index % 6, padx=2, pady=2, sticky="ew")
+            self.switch_buttons.append(button)
         row += 1
 
         ttk.Label(main, text="Preview (next frames)").grid(row=row, column=0, sticky="w")
@@ -409,6 +473,7 @@ class SimulatorApp:
         self.stop_button.grid(row=0, column=4, padx=4)
 
         self._update_button_states()
+        self._refresh_switch_button_labels()
         self.refresh_preview()
 
     def _add_field(self, parent: ttk.Frame, row: int, label: str, default: str, col: int = 0) -> tk.StringVar:
@@ -443,6 +508,27 @@ class SimulatorApp:
             return int(value, 16) if value.lower().startswith("0x") else int(value)
         except ValueError:
             return 0x1F2000123456789A
+
+    def _binary_switch_bank_instance(self) -> int:
+        return max(0, min(255, self._as_int(self.binary_switch_bank_instance.get(), 52)))
+
+    def _refresh_switch_button_labels(self) -> None:
+        for index, button in enumerate(self.switch_buttons, start=1):
+            state_text = "ON" if self.binary_switch_states[index - 1] else "OFF"
+            button.configure(text=f"SW {index}: {state_text}")
+
+    def on_switch_pushbutton(self, switch_number: int) -> None:
+        switch_index = max(1, min(12, switch_number)) - 1
+        self.binary_switch_states[switch_index] = not self.binary_switch_states[switch_index]
+        self._refresh_switch_button_labels()
+        if self.device:
+            payload = build_group_function_binary_switch_command(
+                self._binary_switch_bank_instance(),
+                switch_index + 1,
+                self.binary_switch_states[switch_index],
+            )
+            frame_id = nmea2000_id(DEFAULT_PRIORITY, PGN_GROUP_FUNCTION, self._source_address(), self._destination())
+            self.device.send(frame_id, payload)
 
     def resolve_dll_path(self) -> str:
         path = self.dll_path.get().strip() or DEFAULT_DLL_NAME
@@ -582,6 +668,15 @@ class SimulatorApp:
                         self._as_float(self.engine_torque_percent.get(), 0.0),
                     ),
                     2,
+                    GLOBAL_DESTINATION,
+                )
+            )
+        if self.binary_switch_status_enabled.get():
+            messages.append(
+                ProtocolMessage(
+                    PGN_BINARY_SWITCH_BANK_STATUS,
+                    build_binary_switch_bank_status(self._binary_switch_bank_instance(), self.binary_switch_states),
+                    3,
                     GLOBAL_DESTINATION,
                 )
             )
