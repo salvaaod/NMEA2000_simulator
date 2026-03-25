@@ -343,7 +343,6 @@ class SimulatorApp:
         self.switch_heartbeat_sequence = 0
         self.binary_switch_states = [False] * 12
         self.switch_buttons: list[ttk.Button] = []
-        self.switch_release_jobs: dict[int, str] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -485,10 +484,11 @@ class SimulatorApp:
         for index in range(12):
             button = ttk.Button(
                 switch_frame,
-                text=f"SW {index + 1}: OFF",
-                command=lambda switch_no=index + 1: self.on_switch_pushbutton(switch_no),
+                text=f"SW {index + 1}: RELEASED",
                 width=12,
             )
+            button.bind("<ButtonPress-1>", lambda _event, switch_no=index + 1: self.on_switch_press(switch_no))
+            button.bind("<ButtonRelease-1>", lambda _event, switch_no=index + 1: self.on_switch_release(switch_no))
             button.grid(row=1 + (index // 6), column=index % 6, padx=2, pady=2, sticky="ew")
             self.switch_buttons.append(button)
         row += 1
@@ -571,21 +571,21 @@ class SimulatorApp:
         frame_id = nmea2000_id(DEFAULT_PRIORITY, PGN_GROUP_FUNCTION, self._source_address(), self._destination())
         self.device.send(frame_id, payload)
 
-    def _release_switch(self, switch_number: int) -> None:
+    def on_switch_press(self, switch_number: int) -> None:
         switch_index = max(1, min(12, switch_number)) - 1
-        self.switch_release_jobs.pop(switch_number, None)
+        if self.binary_switch_states[switch_index]:
+            return
+        self.binary_switch_states[switch_index] = True
+        self._refresh_switch_button_labels()
+        self._send_switch_command(switch_number, True)
+
+    def on_switch_release(self, switch_number: int) -> None:
+        switch_index = max(1, min(12, switch_number)) - 1
+        if not self.binary_switch_states[switch_index]:
+            return
         self.binary_switch_states[switch_index] = False
         self._refresh_switch_button_labels()
         self._send_switch_command(switch_number, False)
-
-    def on_switch_pushbutton(self, switch_number: int) -> None:
-        switch_index = max(1, min(12, switch_number)) - 1
-        self.binary_switch_states[switch_index] = True
-        self._refresh_switch_button_labels()
-        self._send_switch_command(switch_index + 1, True)
-        if switch_number in self.switch_release_jobs:
-            self.root.after_cancel(self.switch_release_jobs[switch_number])
-        self.switch_release_jobs[switch_number] = self.root.after(250, lambda sw=switch_number: self._release_switch(sw))
 
     def resolve_dll_path(self) -> str:
         path = self.dll_path.get().strip() or DEFAULT_DLL_NAME
