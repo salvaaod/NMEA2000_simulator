@@ -231,16 +231,25 @@ def build_engine_dynamic(
     return bytes(data)
 
 
-def build_product_info_payload(model_id: str, software_version: str, serial_code: str) -> bytes:
+def build_product_info_payload(model_id: str, software_version: str, model_version: str, serial_code: str) -> bytes:
     # Simplified NMEA2000 Product Information payload (fast packet).
     model = model_id[:32].ljust(32, "\x00").encode("ascii", errors="ignore")
     software = software_version[:32].ljust(32, "\x00").encode("ascii", errors="ignore")
+    version = model_version[:32].ljust(32, "\x00").encode("ascii", errors="ignore")
     serial = serial_code[:32].ljust(32, "\x00").encode("ascii", errors="ignore")
     n2k_version = (2100).to_bytes(2, byteorder="little")
     product_code = (1001).to_bytes(2, byteorder="little")
     cert_level = bytes((1,))
     load_equivalency = bytes((1,))
-    return n2k_version + product_code + model + software + serial + cert_level + load_equivalency
+    return n2k_version + product_code + model + software + version + serial + cert_level + load_equivalency
+
+
+def build_heartbeat_payload(interval_ms: int, sequence_counter: int) -> bytes:
+    return (
+        int(max(0, min(0xFFFF, interval_ms))).to_bytes(2, byteorder="little", signed=False)
+        + bytes((sequence_counter & 0xFF,))
+        + bytes((0xFF,) * 5)
+    )
 
 
 def split_fast_packet(payload: bytes, sequence_id: int) -> list[bytes]:
@@ -275,6 +284,7 @@ class SimulatorApp:
         self.send_job: str | None = None
         self.is_connected = False
         self.fast_packet_sequence = 0
+        self.heartbeat_sequence = 0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -338,10 +348,14 @@ class SimulatorApp:
         ttk.Entry(main, textvariable=self.software_version).grid(row=row, column=3, sticky="ew")
         row += 1
 
-        ttk.Label(main, text="Serial code").grid(row=row, column=0, sticky="w")
+        ttk.Label(main, text="Model version").grid(row=row, column=0, sticky="w")
+        self.model_version = tk.StringVar(value="1.0")
+        ttk.Entry(main, textvariable=self.model_version).grid(row=row, column=1, sticky="ew")
+        ttk.Label(main, text="Serial code").grid(row=row, column=2, sticky="w")
         self.serial_code = tk.StringVar(value="SIM-0001")
-        ttk.Entry(main, textvariable=self.serial_code).grid(row=row, column=1, sticky="ew")
+        ttk.Entry(main, textvariable=self.serial_code).grid(row=row, column=3, sticky="ew")
 
+        row += 1
         ttk.Label(main, text="Interval ms").grid(row=row, column=2, sticky="w")
         self.interval_ms = tk.IntVar(value=100)
         ttk.Entry(main, textvariable=self.interval_ms).grid(row=row, column=3, sticky="ew")
@@ -405,7 +419,7 @@ class SimulatorApp:
             return default
 
     def _source_address(self) -> int:
-        return max(0, min(253, self._as_int(self.source_address.get(), 0)))
+        return max(0, min(251, self._as_int(self.source_address.get(), 0)))
 
     def _destination(self) -> int:
         return max(0, min(255, self._as_int(self.destination_address.get(), 255)))
@@ -511,10 +525,18 @@ class SimulatorApp:
             request_pgn = max(0, min(0x3FFFF, self._as_int(self.iso_request_pgn.get(), PGN_ADDRESS_CLAIM)))
             messages.append(ProtocolMessage(PGN_ISO_REQUEST, build_iso_request(request_pgn), 6, destination))
         if self.product_info_enabled.get():
-            payload = build_product_info_payload(self.product_model.get(), self.software_version.get(), self.serial_code.get())
+            payload = build_product_info_payload(
+                self.product_model.get(),
+                self.software_version.get(),
+                self.model_version.get(),
+                self.serial_code.get(),
+            )
             messages.append(ProtocolMessage(PGN_PRODUCT_INFO, payload, 6, GLOBAL_DESTINATION))
         if self.heartbeat_enabled.get():
-            messages.append(ProtocolMessage(PGN_HEARTBEAT, bytes((engine_instance, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)), 7, GLOBAL_DESTINATION))
+            heartbeat_interval = max(0, self._as_int(str(self.interval_ms.get()), 100))
+            payload = build_heartbeat_payload(heartbeat_interval, self.heartbeat_sequence)
+            self.heartbeat_sequence = (self.heartbeat_sequence + 1) & 0xFF
+            messages.append(ProtocolMessage(PGN_HEARTBEAT, payload, 7, GLOBAL_DESTINATION))
         if self.engine_rapid_enabled.get():
             messages.append(
                 ProtocolMessage(
