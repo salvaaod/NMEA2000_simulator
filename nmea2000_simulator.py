@@ -20,6 +20,8 @@ PGN_PRODUCT_INFO = 126996
 PGN_HEARTBEAT = 126993
 PGN_ENGINE_RAPID = 127488
 PGN_ENGINE_DYNAMIC = 127489
+PGN_GROUP_FUNCTION = 126208
+PGN_BINARY_SWITCH_BANK_STATUS = 127501
 
 GLOBAL_DESTINATION = 0xFF
 DEFAULT_PRIORITY = 6
@@ -41,6 +43,7 @@ class ProtocolMessage:
     data: bytes
     priority: int = DEFAULT_PRIORITY
     destination: int = GLOBAL_DESTINATION
+    source_address: int | None = None
 
 
 class CAN_OBJ(ctypes.Structure):
@@ -171,6 +174,13 @@ def build_address_claim(name: int) -> bytes:
     return name.to_bytes(8, byteorder="little", signed=False)
 
 
+def set_name_manufacturer_code(name: int, manufacturer_code: int) -> int:
+    # NMEA2000 NAME manufacturer code occupies 11 bits at bit position 21.
+    code = max(0, min(0x7FF, int(manufacturer_code)))
+    mask = 0x7FF << 21
+    return (name & ~mask) | (code << 21)
+
+
 def build_iso_request(requested_pgn: int) -> bytes:
     return bytes((requested_pgn & 0xFF, (requested_pgn >> 8) & 0xFF, (requested_pgn >> 16) & 0xFF)) + bytes((0xFF,) * 5)
 
@@ -265,6 +275,45 @@ def build_heartbeat_payload(interval_ms: int, sequence_counter: int) -> bytes:
     )
 
 
+def _pack_2bit_values(values: list[int], output_len: int) -> bytes:
+    packed = bytearray((0x00,) * output_len)
+    for index, value in enumerate(values):
+        bit_pos = index * 2
+        byte_index = bit_pos // 8
+        shift = bit_pos % 8
+        if byte_index >= output_len:
+            break
+        packed[byte_index] |= (value & 0x03) << shift
+    return bytes(packed)
+
+
+def build_binary_switch_bank_status(bank_instance: int, switch_states: list[bool]) -> bytes:
+    # PGN 127501: 1 byte bank instance + 28 x 2-bit switch status fields.
+    # Status encoding used here: 0=Off, 1=On, 3=Unavailable.
+    states_2bit = [(1 if state else 0) for state in switch_states[:12]]
+    if len(states_2bit) < 28:
+        states_2bit.extend([3] * (28 - len(states_2bit)))
+    packed_states = _pack_2bit_values(states_2bit[:28], 7)
+    return bytes((bank_instance & 0xFF,)) + packed_states
+
+
+def build_group_function_binary_switch_command(bank_instance: int, switch_number: int, state_on: bool) -> bytes:
+    # Simplified PGN 126208 (Command Group Function) command payload:
+    # [FunctionCode=1, PGN(127501), NumberOfParams=3, BankInstance, SwitchNumber(1..12), Status(0/1)]
+    return bytes(
+        (
+            1,
+            PGN_BINARY_SWITCH_BANK_STATUS & 0xFF,
+            (PGN_BINARY_SWITCH_BANK_STATUS >> 8) & 0xFF,
+            (PGN_BINARY_SWITCH_BANK_STATUS >> 16) & 0xFF,
+            3,
+            bank_instance & 0xFF,
+            max(1, min(12, switch_number)) & 0xFF,
+            1 if state_on else 0,
+        )
+    )
+
+
 def split_fast_packet(payload: bytes, sequence_id: int) -> list[bytes]:
     if len(payload) <= 8:
         return [payload]
@@ -297,7 +346,10 @@ class SimulatorApp:
         self.send_job: str | None = None
         self.is_connected = False
         self.fast_packet_sequence = 0
-        self.heartbeat_sequence = 0
+        self.engine_heartbeat_sequence = 0
+        self.switch_heartbeat_sequence = 0
+        self.binary_switch_states = [False] * 12
+        self.switch_buttons: list[ttk.Button] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -374,6 +426,33 @@ class SimulatorApp:
         ttk.Entry(main, textvariable=self.interval_ms).grid(row=row, column=3, sticky="ew")
         row += 1
 
+        switch_node = ttk.LabelFrame(main, text="Virtual switch node identity (2nd device)", padding=8)
+        switch_node.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(2, 6))
+        ttk.Label(switch_node, text="Switch node source").grid(row=0, column=0, sticky="w")
+        self.switch_node_source_address = tk.StringVar(value="100")
+        ttk.Entry(switch_node, textvariable=self.switch_node_source_address, width=10).grid(row=0, column=1, sticky="w")
+        ttk.Label(switch_node, text="Switch node NAME (hex)").grid(row=0, column=2, sticky="w")
+        self.switch_node_device_name = tk.StringVar(value="0x1F2000AA12345678")
+        ttk.Entry(switch_node, textvariable=self.switch_node_device_name).grid(row=0, column=3, sticky="ew")
+        ttk.Label(switch_node, text="Switch manufacturer code").grid(row=1, column=0, sticky="w")
+        self.switch_manufacturer_code = tk.StringVar(value="176")
+        ttk.Entry(switch_node, textvariable=self.switch_manufacturer_code, width=10).grid(row=1, column=1, sticky="w")
+
+        ttk.Label(switch_node, text="Switch model").grid(row=1, column=2, sticky="w")
+        self.switch_product_model = tk.StringVar(value="CKM12")
+        ttk.Entry(switch_node, textvariable=self.switch_product_model, width=18).grid(row=1, column=3, sticky="ew")
+        ttk.Label(switch_node, text="Switch software").grid(row=2, column=0, sticky="w")
+        self.switch_software_version = tk.StringVar(value="2.02.08")
+        ttk.Entry(switch_node, textvariable=self.switch_software_version, width=18).grid(row=2, column=1, sticky="ew")
+
+        ttk.Label(switch_node, text="Switch model version").grid(row=2, column=2, sticky="w")
+        self.switch_model_version = tk.StringVar(value="Rev A")
+        ttk.Entry(switch_node, textvariable=self.switch_model_version, width=18).grid(row=2, column=3, sticky="ew")
+        ttk.Label(switch_node, text="Switch serial").grid(row=3, column=0, sticky="w")
+        self.switch_serial_code = tk.StringVar(value="1606029")
+        ttk.Entry(switch_node, textvariable=self.switch_serial_code, width=18).grid(row=3, column=1, sticky="ew")
+        row += 1
+
         enabled = ttk.LabelFrame(main, text="Enabled messages", padding=8)
         enabled.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8, 6))
         self.address_claim_enabled = tk.BooleanVar(value=True)
@@ -382,17 +461,46 @@ class SimulatorApp:
         self.heartbeat_enabled = tk.BooleanVar(value=True)
         self.engine_rapid_enabled = tk.BooleanVar(value=True)
         self.engine_dynamic_enabled = tk.BooleanVar(value=True)
+        self.switch_address_claim_enabled = tk.BooleanVar(value=True)
+        self.switch_product_info_enabled = tk.BooleanVar(value=True)
+        self.switch_heartbeat_enabled = tk.BooleanVar(value=True)
+        self.binary_switch_status_enabled = tk.BooleanVar(value=True)
         ttk.Checkbutton(enabled, text="ISO Address Claim", variable=self.address_claim_enabled).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(enabled, text="ISO Request", variable=self.iso_request_enabled).grid(row=0, column=1, sticky="w")
         ttk.Checkbutton(enabled, text="Product Info", variable=self.product_info_enabled).grid(row=1, column=0, sticky="w")
         ttk.Checkbutton(enabled, text="Heartbeat", variable=self.heartbeat_enabled).grid(row=1, column=1, sticky="w")
         ttk.Checkbutton(enabled, text="Engine Rapid PGN 127488", variable=self.engine_rapid_enabled).grid(row=2, column=0, sticky="w")
         ttk.Checkbutton(enabled, text="Engine Dynamic PGN 127489", variable=self.engine_dynamic_enabled).grid(row=2, column=1, sticky="w")
+        ttk.Checkbutton(enabled, text="Switch node Address Claim", variable=self.switch_address_claim_enabled).grid(
+            row=3, column=0, sticky="w"
+        )
+        ttk.Checkbutton(enabled, text="Switch node Product Info", variable=self.switch_product_info_enabled).grid(
+            row=3, column=1, sticky="w"
+        )
+        ttk.Checkbutton(enabled, text="Switch node Heartbeat", variable=self.switch_heartbeat_enabled).grid(
+            row=4, column=0, sticky="w"
+        )
+        ttk.Checkbutton(
+            enabled, text="Binary Switch Bank Status PGN 127501", variable=self.binary_switch_status_enabled
+        ).grid(row=4, column=1, columnspan=2, sticky="w")
         row += 1
 
-        ttk.Label(main, text="Preview (next frames)").grid(row=row, column=0, sticky="w")
-        self.preview_text = tk.StringVar(value="")
-        ttk.Label(main, textvariable=self.preview_text, justify="left").grid(row=row, column=1, columnspan=3, sticky="w")
+        switch_frame = ttk.LabelFrame(main, text="Binary Switch Bank (1-12 pushbuttons)", padding=8)
+        switch_frame.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(4, 6))
+        ttk.Label(switch_frame, text="Bank instance").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self.binary_switch_bank_instance = tk.StringVar(value="52")
+        ttk.Entry(switch_frame, textvariable=self.binary_switch_bank_instance, width=8).grid(row=0, column=1, sticky="w")
+        ttk.Label(switch_frame, text="Write with PGN 126208 on button press").grid(row=0, column=2, columnspan=4, sticky="w")
+        for index in range(12):
+            button = ttk.Button(
+                switch_frame,
+                text=f"SW {index + 1}: RELEASED",
+                width=12,
+            )
+            button.bind("<ButtonPress-1>", lambda _event, switch_no=index + 1: self.on_switch_press(switch_no))
+            button.bind("<ButtonRelease-1>", lambda _event, switch_no=index + 1: self.on_switch_release(switch_no))
+            button.grid(row=1 + (index // 6), column=index % 6, padx=2, pady=2, sticky="ew")
+            self.switch_buttons.append(button)
         row += 1
 
         buttons = ttk.Frame(main)
@@ -409,7 +517,7 @@ class SimulatorApp:
         self.stop_button.grid(row=0, column=4, padx=4)
 
         self._update_button_states()
-        self.refresh_preview()
+        self._refresh_switch_button_labels()
 
     def _add_field(self, parent: ttk.Frame, row: int, label: str, default: str, col: int = 0) -> tk.StringVar:
         ttk.Label(parent, text=label).grid(row=row, column=col, sticky="w")
@@ -434,6 +542,9 @@ class SimulatorApp:
     def _source_address(self) -> int:
         return max(0, min(251, self._as_int(self.source_address.get(), 0)))
 
+    def _switch_source_address(self) -> int:
+        return max(0, min(251, self._as_int(self.switch_node_source_address.get(), 100)))
+
     def _destination(self) -> int:
         return max(0, min(255, self._as_int(self.destination_address.get(), 255)))
 
@@ -443,6 +554,50 @@ class SimulatorApp:
             return int(value, 16) if value.lower().startswith("0x") else int(value)
         except ValueError:
             return 0x1F2000123456789A
+
+    def _switch_device_name(self) -> int:
+        value = self.switch_node_device_name.get().strip()
+        try:
+            name = int(value, 16) if value.lower().startswith("0x") else int(value)
+        except ValueError:
+            name = 0x1F2000AA12345678
+        manufacturer = self._as_int(self.switch_manufacturer_code.get(), 176)
+        return set_name_manufacturer_code(name, manufacturer)
+
+    def _binary_switch_bank_instance(self) -> int:
+        return max(0, min(255, self._as_int(self.binary_switch_bank_instance.get(), 52)))
+
+    def _refresh_switch_button_labels(self) -> None:
+        for index, button in enumerate(self.switch_buttons, start=1):
+            state_text = "PRESSED" if self.binary_switch_states[index - 1] else "RELEASED"
+            button.configure(text=f"SW {index}: {state_text}")
+
+    def _send_switch_command(self, switch_number: int, state_on: bool) -> None:
+        if not self.device:
+            return
+        payload = build_group_function_binary_switch_command(
+            self._binary_switch_bank_instance(),
+            switch_number,
+            state_on,
+        )
+        frame_id = nmea2000_id(DEFAULT_PRIORITY, PGN_GROUP_FUNCTION, self._source_address(), self._destination())
+        self.device.send(frame_id, payload)
+
+    def on_switch_press(self, switch_number: int) -> None:
+        switch_index = max(1, min(12, switch_number)) - 1
+        if self.binary_switch_states[switch_index]:
+            return
+        self.binary_switch_states[switch_index] = True
+        self._refresh_switch_button_labels()
+        self._send_switch_command(switch_number, True)
+
+    def on_switch_release(self, switch_number: int) -> None:
+        switch_index = max(1, min(12, switch_number)) - 1
+        if not self.binary_switch_states[switch_index]:
+            return
+        self.binary_switch_states[switch_index] = False
+        self._refresh_switch_button_labels()
+        self._send_switch_command(switch_number, False)
 
     def resolve_dll_path(self) -> str:
         path = self.dll_path.get().strip() or DEFAULT_DLL_NAME
@@ -517,7 +672,7 @@ class SimulatorApp:
         self._schedule_send()
 
     def _expand_protocol_message(self, message: ProtocolMessage) -> list[tuple[int, bytes]]:
-        source = self._source_address()
+        source = self._source_address() if message.source_address is None else message.source_address
         if len(message.data) <= 8:
             frame_id = nmea2000_id(message.priority, message.pgn, source, message.destination)
             return [(frame_id, message.data)]
@@ -533,7 +688,9 @@ class SimulatorApp:
 
         messages: list[ProtocolMessage] = []
         if self.address_claim_enabled.get():
-            messages.append(ProtocolMessage(PGN_ADDRESS_CLAIM, build_address_claim(self._device_name()), 6, GLOBAL_DESTINATION))
+            messages.append(
+                ProtocolMessage(PGN_ADDRESS_CLAIM, build_address_claim(self._device_name()), 6, GLOBAL_DESTINATION, self._source_address())
+            )
         if self.iso_request_enabled.get():
             request_pgn = max(0, min(0x3FFFF, self._as_int(self.iso_request_pgn.get(), PGN_ADDRESS_CLAIM)))
             messages.append(ProtocolMessage(PGN_ISO_REQUEST, build_iso_request(request_pgn), 6, destination))
@@ -547,9 +704,9 @@ class SimulatorApp:
             messages.append(ProtocolMessage(PGN_PRODUCT_INFO, payload, 6, GLOBAL_DESTINATION))
         if self.heartbeat_enabled.get():
             heartbeat_interval = max(0, self._as_int(str(self.interval_ms.get()), 100))
-            payload = build_heartbeat_payload(heartbeat_interval, self.heartbeat_sequence)
-            self.heartbeat_sequence = (self.heartbeat_sequence + 1) & 0xFF
-            messages.append(ProtocolMessage(PGN_HEARTBEAT, payload, 7, GLOBAL_DESTINATION))
+            payload = build_heartbeat_payload(heartbeat_interval, self.engine_heartbeat_sequence)
+            self.engine_heartbeat_sequence = (self.engine_heartbeat_sequence + 1) & 0xFF
+            messages.append(ProtocolMessage(PGN_HEARTBEAT, payload, 7, GLOBAL_DESTINATION, self._source_address()))
         if self.engine_rapid_enabled.get():
             messages.append(
                 ProtocolMessage(
@@ -562,6 +719,7 @@ class SimulatorApp:
                     ),
                     2,
                     GLOBAL_DESTINATION,
+                    self._source_address(),
                 )
             )
         if self.engine_dynamic_enabled.get():
@@ -583,6 +741,40 @@ class SimulatorApp:
                     ),
                     2,
                     GLOBAL_DESTINATION,
+                    self._source_address(),
+                )
+            )
+        if self.switch_address_claim_enabled.get():
+            messages.append(
+                ProtocolMessage(
+                    PGN_ADDRESS_CLAIM,
+                    build_address_claim(self._switch_device_name()),
+                    6,
+                    GLOBAL_DESTINATION,
+                    self._switch_source_address(),
+                )
+            )
+        if self.switch_product_info_enabled.get():
+            payload = build_product_info_payload(
+                self.switch_product_model.get(),
+                self.switch_software_version.get(),
+                self.switch_model_version.get(),
+                self.switch_serial_code.get(),
+            )
+            messages.append(ProtocolMessage(PGN_PRODUCT_INFO, payload, 6, GLOBAL_DESTINATION, self._switch_source_address()))
+        if self.switch_heartbeat_enabled.get():
+            heartbeat_interval = max(0, self._as_int(str(self.interval_ms.get()), 100))
+            payload = build_heartbeat_payload(heartbeat_interval, self.switch_heartbeat_sequence)
+            self.switch_heartbeat_sequence = (self.switch_heartbeat_sequence + 1) & 0xFF
+            messages.append(ProtocolMessage(PGN_HEARTBEAT, payload, 7, GLOBAL_DESTINATION, self._switch_source_address()))
+        if self.binary_switch_status_enabled.get():
+            messages.append(
+                ProtocolMessage(
+                    PGN_BINARY_SWITCH_BANK_STATUS,
+                    build_binary_switch_bank_status(self._binary_switch_bank_instance(), self.binary_switch_states),
+                    3,
+                    GLOBAL_DESTINATION,
+                    self._switch_source_address(),
                 )
             )
         return messages
@@ -592,15 +784,6 @@ class SimulatorApp:
         for message in self.current_messages():
             frames.extend(self._expand_protocol_message(message))
         return frames
-
-    def refresh_preview(self) -> None:
-        lines = []
-        for idx, (frame_id, data) in enumerate(self.current_frames()[:8], start=1):
-            lines.append(f"{idx}. 0x{frame_id:08X} / {' '.join(f'{b:02X}' for b in data)}")
-        if not lines:
-            lines.append("No messages enabled")
-        self.preview_text.set("\n".join(lines))
-        self.root.after(250, self.refresh_preview)
 
     def _update_button_states(self) -> None:
         if self.is_connected:
