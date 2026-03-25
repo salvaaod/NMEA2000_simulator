@@ -174,6 +174,13 @@ def build_address_claim(name: int) -> bytes:
     return name.to_bytes(8, byteorder="little", signed=False)
 
 
+def set_name_manufacturer_code(name: int, manufacturer_code: int) -> int:
+    # NMEA2000 NAME manufacturer code occupies 11 bits at bit position 21.
+    code = max(0, min(0x7FF, int(manufacturer_code)))
+    mask = 0x7FF << 21
+    return (name & ~mask) | (code << 21)
+
+
 def build_iso_request(requested_pgn: int) -> bytes:
     return bytes((requested_pgn & 0xFF, (requested_pgn >> 8) & 0xFF, (requested_pgn >> 16) & 0xFF)) + bytes((0xFF,) * 5)
 
@@ -427,20 +434,23 @@ class SimulatorApp:
         ttk.Label(switch_node, text="Switch node NAME (hex)").grid(row=0, column=2, sticky="w")
         self.switch_node_device_name = tk.StringVar(value="0x1F2000AA12345678")
         ttk.Entry(switch_node, textvariable=self.switch_node_device_name).grid(row=0, column=3, sticky="ew")
+        ttk.Label(switch_node, text="Switch manufacturer code").grid(row=1, column=0, sticky="w")
+        self.switch_manufacturer_code = tk.StringVar(value="176")
+        ttk.Entry(switch_node, textvariable=self.switch_manufacturer_code, width=10).grid(row=1, column=1, sticky="w")
 
-        ttk.Label(switch_node, text="Switch model").grid(row=1, column=0, sticky="w")
+        ttk.Label(switch_node, text="Switch model").grid(row=1, column=2, sticky="w")
         self.switch_product_model = tk.StringVar(value="CKM12")
-        ttk.Entry(switch_node, textvariable=self.switch_product_model, width=18).grid(row=1, column=1, sticky="ew")
-        ttk.Label(switch_node, text="Switch software").grid(row=1, column=2, sticky="w")
+        ttk.Entry(switch_node, textvariable=self.switch_product_model, width=18).grid(row=1, column=3, sticky="ew")
+        ttk.Label(switch_node, text="Switch software").grid(row=2, column=0, sticky="w")
         self.switch_software_version = tk.StringVar(value="2.02.08")
-        ttk.Entry(switch_node, textvariable=self.switch_software_version, width=18).grid(row=1, column=3, sticky="ew")
+        ttk.Entry(switch_node, textvariable=self.switch_software_version, width=18).grid(row=2, column=1, sticky="ew")
 
-        ttk.Label(switch_node, text="Switch model version").grid(row=2, column=0, sticky="w")
+        ttk.Label(switch_node, text="Switch model version").grid(row=2, column=2, sticky="w")
         self.switch_model_version = tk.StringVar(value="Rev A")
-        ttk.Entry(switch_node, textvariable=self.switch_model_version, width=18).grid(row=2, column=1, sticky="ew")
-        ttk.Label(switch_node, text="Switch serial").grid(row=2, column=2, sticky="w")
+        ttk.Entry(switch_node, textvariable=self.switch_model_version, width=18).grid(row=2, column=3, sticky="ew")
+        ttk.Label(switch_node, text="Switch serial").grid(row=3, column=0, sticky="w")
         self.switch_serial_code = tk.StringVar(value="1606029")
-        ttk.Entry(switch_node, textvariable=self.switch_serial_code, width=18).grid(row=2, column=3, sticky="ew")
+        ttk.Entry(switch_node, textvariable=self.switch_serial_code, width=18).grid(row=3, column=1, sticky="ew")
         row += 1
 
         enabled = ttk.LabelFrame(main, text="Enabled messages", padding=8)
@@ -548,9 +558,11 @@ class SimulatorApp:
     def _switch_device_name(self) -> int:
         value = self.switch_node_device_name.get().strip()
         try:
-            return int(value, 16) if value.lower().startswith("0x") else int(value)
+            name = int(value, 16) if value.lower().startswith("0x") else int(value)
         except ValueError:
-            return 0x1F2000AA12345678
+            name = 0x1F2000AA12345678
+        manufacturer = self._as_int(self.switch_manufacturer_code.get(), 176)
+        return set_name_manufacturer_code(name, manufacturer)
 
     def _binary_switch_bank_instance(self) -> int:
         return max(0, min(255, self._as_int(self.binary_switch_bank_instance.get(), 52)))
