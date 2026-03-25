@@ -43,6 +43,7 @@ class ProtocolMessage:
     data: bytes
     priority: int = DEFAULT_PRIORITY
     destination: int = GLOBAL_DESTINATION
+    source_address: int | None = None
 
 
 class CAN_OBJ(ctypes.Structure):
@@ -338,7 +339,8 @@ class SimulatorApp:
         self.send_job: str | None = None
         self.is_connected = False
         self.fast_packet_sequence = 0
-        self.heartbeat_sequence = 0
+        self.engine_heartbeat_sequence = 0
+        self.switch_heartbeat_sequence = 0
         self.binary_switch_states = [False] * 12
         self.switch_buttons: list[ttk.Button] = []
         self._build_ui()
@@ -417,6 +419,30 @@ class SimulatorApp:
         ttk.Entry(main, textvariable=self.interval_ms).grid(row=row, column=3, sticky="ew")
         row += 1
 
+        switch_node = ttk.LabelFrame(main, text="Virtual switch node identity (2nd device)", padding=8)
+        switch_node.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(2, 6))
+        ttk.Label(switch_node, text="Switch node source").grid(row=0, column=0, sticky="w")
+        self.switch_node_source_address = tk.StringVar(value="100")
+        ttk.Entry(switch_node, textvariable=self.switch_node_source_address, width=10).grid(row=0, column=1, sticky="w")
+        ttk.Label(switch_node, text="Switch node NAME (hex)").grid(row=0, column=2, sticky="w")
+        self.switch_node_device_name = tk.StringVar(value="0x1F2000AA12345678")
+        ttk.Entry(switch_node, textvariable=self.switch_node_device_name).grid(row=0, column=3, sticky="ew")
+
+        ttk.Label(switch_node, text="Switch model").grid(row=1, column=0, sticky="w")
+        self.switch_product_model = tk.StringVar(value="CKM12")
+        ttk.Entry(switch_node, textvariable=self.switch_product_model, width=18).grid(row=1, column=1, sticky="ew")
+        ttk.Label(switch_node, text="Switch software").grid(row=1, column=2, sticky="w")
+        self.switch_software_version = tk.StringVar(value="2.02.08")
+        ttk.Entry(switch_node, textvariable=self.switch_software_version, width=18).grid(row=1, column=3, sticky="ew")
+
+        ttk.Label(switch_node, text="Switch model version").grid(row=2, column=0, sticky="w")
+        self.switch_model_version = tk.StringVar(value="Rev A")
+        ttk.Entry(switch_node, textvariable=self.switch_model_version, width=18).grid(row=2, column=1, sticky="ew")
+        ttk.Label(switch_node, text="Switch serial").grid(row=2, column=2, sticky="w")
+        self.switch_serial_code = tk.StringVar(value="1606029")
+        ttk.Entry(switch_node, textvariable=self.switch_serial_code, width=18).grid(row=2, column=3, sticky="ew")
+        row += 1
+
         enabled = ttk.LabelFrame(main, text="Enabled messages", padding=8)
         enabled.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8, 6))
         self.address_claim_enabled = tk.BooleanVar(value=True)
@@ -425,6 +451,9 @@ class SimulatorApp:
         self.heartbeat_enabled = tk.BooleanVar(value=True)
         self.engine_rapid_enabled = tk.BooleanVar(value=True)
         self.engine_dynamic_enabled = tk.BooleanVar(value=True)
+        self.switch_address_claim_enabled = tk.BooleanVar(value=True)
+        self.switch_product_info_enabled = tk.BooleanVar(value=True)
+        self.switch_heartbeat_enabled = tk.BooleanVar(value=True)
         self.binary_switch_status_enabled = tk.BooleanVar(value=True)
         ttk.Checkbutton(enabled, text="ISO Address Claim", variable=self.address_claim_enabled).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(enabled, text="ISO Request", variable=self.iso_request_enabled).grid(row=0, column=1, sticky="w")
@@ -432,9 +461,18 @@ class SimulatorApp:
         ttk.Checkbutton(enabled, text="Heartbeat", variable=self.heartbeat_enabled).grid(row=1, column=1, sticky="w")
         ttk.Checkbutton(enabled, text="Engine Rapid PGN 127488", variable=self.engine_rapid_enabled).grid(row=2, column=0, sticky="w")
         ttk.Checkbutton(enabled, text="Engine Dynamic PGN 127489", variable=self.engine_dynamic_enabled).grid(row=2, column=1, sticky="w")
+        ttk.Checkbutton(enabled, text="Switch node Address Claim", variable=self.switch_address_claim_enabled).grid(
+            row=3, column=0, sticky="w"
+        )
+        ttk.Checkbutton(enabled, text="Switch node Product Info", variable=self.switch_product_info_enabled).grid(
+            row=3, column=1, sticky="w"
+        )
+        ttk.Checkbutton(enabled, text="Switch node Heartbeat", variable=self.switch_heartbeat_enabled).grid(
+            row=4, column=0, sticky="w"
+        )
         ttk.Checkbutton(
             enabled, text="Binary Switch Bank Status PGN 127501", variable=self.binary_switch_status_enabled
-        ).grid(row=3, column=0, columnspan=2, sticky="w")
+        ).grid(row=4, column=1, columnspan=2, sticky="w")
         row += 1
 
         switch_frame = ttk.LabelFrame(main, text="Binary Switch Bank (1-12 pushbuttons)", padding=8)
@@ -499,6 +537,9 @@ class SimulatorApp:
     def _source_address(self) -> int:
         return max(0, min(251, self._as_int(self.source_address.get(), 0)))
 
+    def _switch_source_address(self) -> int:
+        return max(0, min(251, self._as_int(self.switch_node_source_address.get(), 100)))
+
     def _destination(self) -> int:
         return max(0, min(255, self._as_int(self.destination_address.get(), 255)))
 
@@ -508,6 +549,13 @@ class SimulatorApp:
             return int(value, 16) if value.lower().startswith("0x") else int(value)
         except ValueError:
             return 0x1F2000123456789A
+
+    def _switch_device_name(self) -> int:
+        value = self.switch_node_device_name.get().strip()
+        try:
+            return int(value, 16) if value.lower().startswith("0x") else int(value)
+        except ValueError:
+            return 0x1F2000AA12345678
 
     def _binary_switch_bank_instance(self) -> int:
         return max(0, min(255, self._as_int(self.binary_switch_bank_instance.get(), 52)))
@@ -603,7 +651,7 @@ class SimulatorApp:
         self._schedule_send()
 
     def _expand_protocol_message(self, message: ProtocolMessage) -> list[tuple[int, bytes]]:
-        source = self._source_address()
+        source = self._source_address() if message.source_address is None else message.source_address
         if len(message.data) <= 8:
             frame_id = nmea2000_id(message.priority, message.pgn, source, message.destination)
             return [(frame_id, message.data)]
@@ -619,7 +667,9 @@ class SimulatorApp:
 
         messages: list[ProtocolMessage] = []
         if self.address_claim_enabled.get():
-            messages.append(ProtocolMessage(PGN_ADDRESS_CLAIM, build_address_claim(self._device_name()), 6, GLOBAL_DESTINATION))
+            messages.append(
+                ProtocolMessage(PGN_ADDRESS_CLAIM, build_address_claim(self._device_name()), 6, GLOBAL_DESTINATION, self._source_address())
+            )
         if self.iso_request_enabled.get():
             request_pgn = max(0, min(0x3FFFF, self._as_int(self.iso_request_pgn.get(), PGN_ADDRESS_CLAIM)))
             messages.append(ProtocolMessage(PGN_ISO_REQUEST, build_iso_request(request_pgn), 6, destination))
@@ -633,9 +683,9 @@ class SimulatorApp:
             messages.append(ProtocolMessage(PGN_PRODUCT_INFO, payload, 6, GLOBAL_DESTINATION))
         if self.heartbeat_enabled.get():
             heartbeat_interval = max(0, self._as_int(str(self.interval_ms.get()), 100))
-            payload = build_heartbeat_payload(heartbeat_interval, self.heartbeat_sequence)
-            self.heartbeat_sequence = (self.heartbeat_sequence + 1) & 0xFF
-            messages.append(ProtocolMessage(PGN_HEARTBEAT, payload, 7, GLOBAL_DESTINATION))
+            payload = build_heartbeat_payload(heartbeat_interval, self.engine_heartbeat_sequence)
+            self.engine_heartbeat_sequence = (self.engine_heartbeat_sequence + 1) & 0xFF
+            messages.append(ProtocolMessage(PGN_HEARTBEAT, payload, 7, GLOBAL_DESTINATION, self._source_address()))
         if self.engine_rapid_enabled.get():
             messages.append(
                 ProtocolMessage(
@@ -648,6 +698,7 @@ class SimulatorApp:
                     ),
                     2,
                     GLOBAL_DESTINATION,
+                    self._source_address(),
                 )
             )
         if self.engine_dynamic_enabled.get():
@@ -669,8 +720,32 @@ class SimulatorApp:
                     ),
                     2,
                     GLOBAL_DESTINATION,
+                    self._source_address(),
                 )
             )
+        if self.switch_address_claim_enabled.get():
+            messages.append(
+                ProtocolMessage(
+                    PGN_ADDRESS_CLAIM,
+                    build_address_claim(self._switch_device_name()),
+                    6,
+                    GLOBAL_DESTINATION,
+                    self._switch_source_address(),
+                )
+            )
+        if self.switch_product_info_enabled.get():
+            payload = build_product_info_payload(
+                self.switch_product_model.get(),
+                self.switch_software_version.get(),
+                self.switch_model_version.get(),
+                self.switch_serial_code.get(),
+            )
+            messages.append(ProtocolMessage(PGN_PRODUCT_INFO, payload, 6, GLOBAL_DESTINATION, self._switch_source_address()))
+        if self.switch_heartbeat_enabled.get():
+            heartbeat_interval = max(0, self._as_int(str(self.interval_ms.get()), 100))
+            payload = build_heartbeat_payload(heartbeat_interval, self.switch_heartbeat_sequence)
+            self.switch_heartbeat_sequence = (self.switch_heartbeat_sequence + 1) & 0xFF
+            messages.append(ProtocolMessage(PGN_HEARTBEAT, payload, 7, GLOBAL_DESTINATION, self._switch_source_address()))
         if self.binary_switch_status_enabled.get():
             messages.append(
                 ProtocolMessage(
@@ -678,6 +753,7 @@ class SimulatorApp:
                     build_binary_switch_bank_status(self._binary_switch_bank_instance(), self.binary_switch_states),
                     3,
                     GLOBAL_DESTINATION,
+                    self._switch_source_address(),
                 )
             )
         return messages
