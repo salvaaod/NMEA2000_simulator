@@ -343,6 +343,7 @@ class SimulatorApp:
         self.switch_heartbeat_sequence = 0
         self.binary_switch_states = [False] * 12
         self.switch_buttons: list[ttk.Button] = []
+        self.switch_release_jobs: dict[int, str] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -492,11 +493,6 @@ class SimulatorApp:
             self.switch_buttons.append(button)
         row += 1
 
-        ttk.Label(main, text="Preview (next frames)").grid(row=row, column=0, sticky="w")
-        self.preview_text = tk.StringVar(value="")
-        ttk.Label(main, textvariable=self.preview_text, justify="left").grid(row=row, column=1, columnspan=3, sticky="w")
-        row += 1
-
         buttons = ttk.Frame(main)
         buttons.grid(row=row, column=0, columnspan=4, pady=8, sticky="ew")
         self.connect_button = ttk.Button(buttons, text="Connect", command=self.connect)
@@ -512,7 +508,6 @@ class SimulatorApp:
 
         self._update_button_states()
         self._refresh_switch_button_labels()
-        self.refresh_preview()
 
     def _add_field(self, parent: ttk.Frame, row: int, label: str, default: str, col: int = 0) -> tk.StringVar:
         ttk.Label(parent, text=label).grid(row=row, column=col, sticky="w")
@@ -562,21 +557,35 @@ class SimulatorApp:
 
     def _refresh_switch_button_labels(self) -> None:
         for index, button in enumerate(self.switch_buttons, start=1):
-            state_text = "ON" if self.binary_switch_states[index - 1] else "OFF"
+            state_text = "PRESSED" if self.binary_switch_states[index - 1] else "RELEASED"
             button.configure(text=f"SW {index}: {state_text}")
+
+    def _send_switch_command(self, switch_number: int, state_on: bool) -> None:
+        if not self.device:
+            return
+        payload = build_group_function_binary_switch_command(
+            self._binary_switch_bank_instance(),
+            switch_number,
+            state_on,
+        )
+        frame_id = nmea2000_id(DEFAULT_PRIORITY, PGN_GROUP_FUNCTION, self._source_address(), self._destination())
+        self.device.send(frame_id, payload)
+
+    def _release_switch(self, switch_number: int) -> None:
+        switch_index = max(1, min(12, switch_number)) - 1
+        self.switch_release_jobs.pop(switch_number, None)
+        self.binary_switch_states[switch_index] = False
+        self._refresh_switch_button_labels()
+        self._send_switch_command(switch_number, False)
 
     def on_switch_pushbutton(self, switch_number: int) -> None:
         switch_index = max(1, min(12, switch_number)) - 1
-        self.binary_switch_states[switch_index] = not self.binary_switch_states[switch_index]
+        self.binary_switch_states[switch_index] = True
         self._refresh_switch_button_labels()
-        if self.device:
-            payload = build_group_function_binary_switch_command(
-                self._binary_switch_bank_instance(),
-                switch_index + 1,
-                self.binary_switch_states[switch_index],
-            )
-            frame_id = nmea2000_id(DEFAULT_PRIORITY, PGN_GROUP_FUNCTION, self._source_address(), self._destination())
-            self.device.send(frame_id, payload)
+        self._send_switch_command(switch_index + 1, True)
+        if switch_number in self.switch_release_jobs:
+            self.root.after_cancel(self.switch_release_jobs[switch_number])
+        self.switch_release_jobs[switch_number] = self.root.after(250, lambda sw=switch_number: self._release_switch(sw))
 
     def resolve_dll_path(self) -> str:
         path = self.dll_path.get().strip() or DEFAULT_DLL_NAME
@@ -763,15 +772,6 @@ class SimulatorApp:
         for message in self.current_messages():
             frames.extend(self._expand_protocol_message(message))
         return frames
-
-    def refresh_preview(self) -> None:
-        lines = []
-        for idx, (frame_id, data) in enumerate(self.current_frames()[:8], start=1):
-            lines.append(f"{idx}. 0x{frame_id:08X} / {' '.join(f'{b:02X}' for b in data)}")
-        if not lines:
-            lines.append("No messages enabled")
-        self.preview_text.set("\n".join(lines))
-        self.root.after(250, self.refresh_preview)
 
     def _update_button_states(self) -> None:
         if self.is_connected:
