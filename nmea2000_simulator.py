@@ -234,7 +234,13 @@ def build_engine_dynamic(
     data.extend(hours_raw.to_bytes(4, byteorder="little", signed=False))
     data.extend(le_u16(coolant_p_raw))
     data.extend(le_u16(fuel_p_raw))
-    data.extend((0xFF, 0xFF, 0xFF, 0xFF, load_raw, torque_raw))
+    # Byte layout after fuel pressure is:
+    # Reserved (1), Engine Discrete Status 1 (2), Engine Discrete Status 2 (2),
+    # Percent Engine Load (1), Percent Engine Torque (1)
+    data.extend((0xFF,))
+    data.extend(le_u16(0xFFFF))
+    data.extend(le_u16(0xFFFF))
+    data.extend((load_raw, torque_raw))
     return bytes(data)
 
 
