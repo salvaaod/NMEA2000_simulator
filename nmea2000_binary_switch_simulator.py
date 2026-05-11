@@ -17,62 +17,26 @@ from nmea2000_simulator import (
     DeviceConfig,
     USBCANDevice,
     build_address_claim,
-    build_binary_switch_bank_status,
     build_heartbeat_payload,
     nmea2000_id,
     set_name_manufacturer_code,
 )
 
-SWITCH_COUNT = 8
+SWITCH_COUNT = 6
 PGN_BINARY_SWITCH_BANK_CONTROL = 127502
 DEFAULT_SWITCH_SOURCE_ADDRESS = 55
 DEFAULT_SWITCH_BANK_INSTANCE = 1
 DEFAULT_SWITCH_DEVICE_NAME = 0x1F2000AA12345678
 DEFAULT_MANUFACTURER_CODE = 176
-DEFAULT_PRODUCT_NAME = "Azimut Switch"
-DEFAULT_APPLICATION_VERSION = "0.1"
-DEFAULT_DATABASE_VERSION = 2000
-DEFAULT_MODEL_VERSION = "SW1"
-DEFAULT_PRODUCT_CODE = 1
-DEFAULT_PRODUCT_ID = "AZ_SW"
 ADDRESS_CLAIM_INTERVAL_MS = 30_000
 HEARTBEAT_INTERVAL_MS = 1_000
+RECEIVE_POLL_INTERVAL_MS = 50
 FEEDBACK_LATCH_TIMEOUT_MS = 200
 
 
-def _ascii_field(value: str, length: int = 32) -> bytes:
-    return value[:length].ljust(length, "\x00").encode("ascii", errors="ignore")
-
-
-def build_switch_product_info_payload(
-    product_name: str,
-    application_version: str,
-    database_version: int,
-    model_version: str,
-    product_code: int,
-    product_id: str,
-) -> bytes:
-    # PGN 126996 Product Information layout:
-    # NMEA/database version (uint16), product code (uint16), product/model ID (32 ASCII),
-    # software/application version (32 ASCII), model version (32 ASCII), serial/product name (32 ASCII),
-    # certification level (uint8), and load equivalency (uint8).
-    database = int(max(0, min(0xFFFF, database_version))).to_bytes(2, byteorder="little", signed=False)
-    product_code_bytes = int(max(0, min(0xFFFF, product_code))).to_bytes(2, byteorder="little", signed=False)
-    return (
-        database
-        + product_code_bytes
-        + _ascii_field(product_id)
-        + _ascii_field(application_version)
-        + _ascii_field(model_version)
-        + _ascii_field(product_name)
-        + bytes((1, 1))
-    )
-
-
 def build_binary_switch_bank_control(bank_instance: int, switch_number: int, state_on: bool) -> bytes:
-    # PGN 127502 Binary Switch Bank Control uses the same 2-bit switch field packing
-    # as PGN 127501. For a momentary button event, command only the changed switch
-    # and mark every other switch as unavailable/no command.
+    # PGN 127502 Binary Switch Bank Control uses 2-bit switch fields.
+    # Command only the changed switch; all other switch fields are marked as no-command/unavailable.
     switch_commands = [3] * 28
     switch_index = max(1, min(SWITCH_COUNT, switch_number)) - 1
     switch_commands[switch_index] = 1 if state_on else 0
@@ -100,8 +64,8 @@ def decode_binary_switch_bank_status(data: bytes, switch_count: int = SWITCH_COU
     if len(data) < 8:
         return None
     bank_instance = data[0]
-    states: list[int] = []
     packed = data[1:8]
+    states: list[int] = []
     for index in range(min(28, switch_count)):
         bit_pos = index * 2
         states.append((packed[bit_pos // 8] >> (bit_pos % 8)) & 0x03)
@@ -111,117 +75,75 @@ def decode_binary_switch_bank_status(data: bytes, switch_count: int = SWITCH_COU
 class BinarySwitchSimulatorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("NMEA2000 Binary Switch Simulator (8 switches)")
+        self.root.title("Azimut NMEA2000 Switch Simulator")
         self.device: USBCANDevice | None = None
-        self.send_job: str | None = None
         self.receive_job: str | None = None
         self.address_claim_job: str | None = None
         self.heartbeat_job: str | None = None
         self.is_connected = False
-        self.fast_packet_sequence = 0
         self.heartbeat_sequence = 0
         self.switch_states = [False] * SWITCH_COUNT
         self.switch_status_values = [0] * SWITCH_COUNT
         self.pending_switch_targets: list[int | None] = [None] * SWITCH_COUNT
         self.pending_feedback_jobs: list[str | None] = [None] * SWITCH_COUNT
         self.switch_buttons: list[ttk.Button] = []
+        self.source_address = tk.StringVar(value=str(DEFAULT_SWITCH_SOURCE_ADDRESS))
+        self.bank_instance = tk.StringVar(value=str(DEFAULT_SWITCH_BANK_INSTANCE))
+        self.manufacturer_code = tk.StringVar(value=str(DEFAULT_MANUFACTURER_CODE))
         self._build_ui()
+        self.root.after(100, self.connect)
 
     def _build_ui(self) -> None:
-        main = ttk.Frame(self.root, padding=10)
+        self._build_menu()
+        main = ttk.Frame(self.root, padding=12)
         main.grid(sticky="nsew")
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
-        main.columnconfigure(1, weight=1)
-        main.columnconfigure(3, weight=1)
+        for column in range(3):
+            main.columnconfigure(column, weight=1)
 
-        self.status_text = tk.StringVar(value="Status: Disconnected")
-        ttk.Label(main, textvariable=self.status_text).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        self.status_text = tk.StringVar(value="Status: Starting...")
+        ttk.Label(main, textvariable=self.status_text).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
-        ttk.Label(main, text="DLL path").grid(row=1, column=0, sticky="w")
-        self.dll_path = tk.StringVar(value=DEFAULT_DLL_NAME)
-        ttk.Entry(main, textvariable=self.dll_path).grid(row=1, column=1, columnspan=3, sticky="ew")
+        ttk.Label(
+            main,
+            text="Click a switch to send PGN 127502 with the inverse of the last received PGN 127501 status.",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
-        ttk.Label(main, text="Source address").grid(row=2, column=0, sticky="w")
-        self.source_address = tk.StringVar(value=str(DEFAULT_SWITCH_SOURCE_ADDRESS))
-        ttk.Entry(main, textvariable=self.source_address, width=10).grid(row=2, column=1, sticky="w")
-
-        ttk.Label(main, text="Destination").grid(row=2, column=2, sticky="w")
-        self.destination_address = tk.StringVar(value=str(GLOBAL_DESTINATION))
-        ttk.Entry(main, textvariable=self.destination_address, width=10).grid(row=2, column=3, sticky="w")
-
-        ttk.Label(main, text="Device NAME (hex)").grid(row=3, column=0, sticky="w")
-        self.device_name = tk.StringVar(value=f"0x{DEFAULT_SWITCH_DEVICE_NAME:016X}")
-        ttk.Entry(main, textvariable=self.device_name).grid(row=3, column=1, sticky="ew")
-
-        ttk.Label(main, text="Manufacturer code").grid(row=3, column=2, sticky="w")
-        self.manufacturer_code = tk.StringVar(value=str(DEFAULT_MANUFACTURER_CODE))
-        ttk.Entry(main, textvariable=self.manufacturer_code, width=10).grid(row=3, column=3, sticky="w")
-
-        ttk.Label(main, text="Bank instance").grid(row=4, column=0, sticky="w")
-        self.bank_instance = tk.StringVar(value=str(DEFAULT_SWITCH_BANK_INSTANCE))
-        ttk.Entry(main, textvariable=self.bank_instance, width=10).grid(row=4, column=1, sticky="w")
-
-        ttk.Label(main, text="Interval ms").grid(row=4, column=2, sticky="w")
-        self.interval_ms = tk.IntVar(value=100)
-        ttk.Entry(main, textvariable=self.interval_ms, width=10).grid(row=4, column=3, sticky="w")
-
-        product = ttk.LabelFrame(main, text="Product information", padding=8)
-        product.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 6))
-        product.columnconfigure(1, weight=1)
-        product.columnconfigure(3, weight=1)
-        self.product_name = self._add_field(product, 0, "Device/Product name", DEFAULT_PRODUCT_NAME, col=0)
-        self.application_version = self._add_field(product, 0, "Application version", DEFAULT_APPLICATION_VERSION, col=2)
-        self.database_version = self._add_field(product, 1, "Database version", str(DEFAULT_DATABASE_VERSION), col=0)
-        self.model_version = self._add_field(product, 1, "Model version", DEFAULT_MODEL_VERSION, col=2)
-        self.product_code = self._add_field(product, 2, "Product code", str(DEFAULT_PRODUCT_CODE), col=0)
-        self.product_id = self._add_field(product, 2, "Product ID", DEFAULT_PRODUCT_ID, col=2)
-
-        enabled = ttk.LabelFrame(main, text="Enabled messages", padding=8)
-        enabled.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(4, 6))
-        self.binary_switch_status_enabled = tk.BooleanVar(value=True)
-        self.receive_binary_switch_status_enabled = tk.BooleanVar(value=True)
-        ttk.Label(enabled, text="Address Claim (60928): on connect, conflict, then every 30 s").grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(enabled, text="Heartbeat (126993): every 1 s while connected").grid(row=1, column=0, columnspan=2, sticky="w")
-        ttk.Checkbutton(enabled, text="Send Binary Switch Bank Status (127501) at Interval ms", variable=self.binary_switch_status_enabled).grid(
-            row=2, column=0, sticky="w"
-        )
-        ttk.Checkbutton(
-            enabled, text="Receive Binary Switch Bank Status (127501) for feedback latch", variable=self.receive_binary_switch_status_enabled
-        ).grid(row=2, column=1, sticky="w")
-        ttk.Label(enabled, text="Buttons send PGN 127502 only; PGN 126208 is not used.").grid(row=3, column=0, columnspan=2, sticky="w")
-
-        switch_frame = ttk.LabelFrame(main, text="Binary Switch Bank (8 pushbuttons)", padding=8)
-        switch_frame.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 6))
-        ttk.Label(switch_frame, text="Click sends inverse state via PGN 127502; received PGN 127501 latches labels.").grid(
-            row=0, column=0, columnspan=4, sticky="w", pady=(0, 4)
-        )
         for index in range(SWITCH_COUNT):
-            button = ttk.Button(switch_frame, text=f"SW {index + 1}: OFF", width=16, command=lambda switch_no=index + 1: self.on_switch_click(switch_no))
-            button.grid(row=1 + (index // 4), column=index % 4, padx=3, pady=3, sticky="ew")
+            button = ttk.Button(main, text=f"SW {index + 1}: OFF", width=18, command=lambda switch_no=index + 1: self.on_switch_click(switch_no))
+            button.grid(row=2 + (index // 3), column=index % 3, padx=4, pady=4, sticky="ew")
             self.switch_buttons.append(button)
-
-        buttons = ttk.Frame(main)
-        buttons.grid(row=8, column=0, columnspan=4, pady=8, sticky="ew")
-        self.connect_button = ttk.Button(buttons, text="Connect", command=self.connect)
-        self.connect_button.grid(row=0, column=0, padx=4)
-        self.disconnect_button = ttk.Button(buttons, text="Disconnect", command=self.disconnect)
-        self.disconnect_button.grid(row=0, column=1, padx=4)
-        self.send_once_button = ttk.Button(buttons, text="Send Once", command=self.send_once)
-        self.send_once_button.grid(row=0, column=2, padx=4)
-        self.start_button = ttk.Button(buttons, text="Start Periodic", command=self.start_periodic)
-        self.start_button.grid(row=0, column=3, padx=4)
-        self.stop_button = ttk.Button(buttons, text="Stop Periodic", command=self.stop_periodic)
-        self.stop_button.grid(row=0, column=4, padx=4)
-
-        self._update_button_states()
         self._refresh_switch_button_labels()
 
-    def _add_field(self, parent: ttk.Frame, row: int, label: str, default: str, col: int = 0) -> tk.StringVar:
-        ttk.Label(parent, text=label).grid(row=row, column=col, sticky="w")
-        value = tk.StringVar(value=default)
-        ttk.Entry(parent, textvariable=value).grid(row=row, column=col + 1, sticky="ew")
-        return value
+    def _build_menu(self) -> None:
+        menu_bar = tk.Menu(self.root)
+        settings_menu = tk.Menu(menu_bar, tearoff=False)
+        settings_menu.add_command(label="Node settings...", command=self.open_settings_dialog)
+        settings_menu.add_separator()
+        settings_menu.add_command(label="Retry connection", command=self.connect)
+        menu_bar.add_cascade(label="Settings", menu=settings_menu)
+        self.root.config(menu=menu_bar)
+
+    def open_settings_dialog(self) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Node settings")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        frame = ttk.Frame(dialog, padding=10)
+        frame.grid(sticky="nsew")
+
+        self._add_setting_field(frame, 0, "CAN source address", self.source_address)
+        self._add_setting_field(frame, 1, "Bank instance", self.bank_instance)
+        self._add_setting_field(frame, 2, "Manufacturer code", self.manufacturer_code)
+        ttk.Label(frame, text="Settings affect subsequent frames; reconnect if hardware identity changes are required.").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
+        ttk.Button(frame, text="Close", command=dialog.destroy).grid(row=4, column=0, columnspan=2, pady=(10, 0))
+
+    def _add_setting_field(self, parent: ttk.Frame, row: int, label: str, variable: tk.StringVar) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
+        ttk.Entry(parent, textvariable=variable, width=16).grid(row=row, column=1, sticky="ew", pady=2)
 
     def _as_int(self, value: str, default: int = 0) -> int:
         try:
@@ -235,17 +157,9 @@ class BinarySwitchSimulatorApp:
     def _source_address(self) -> int:
         return max(0, min(251, self._as_int(self.source_address.get(), DEFAULT_SWITCH_SOURCE_ADDRESS)))
 
-    def _destination(self) -> int:
-        return max(0, min(255, self._as_int(self.destination_address.get(), GLOBAL_DESTINATION)))
-
     def _device_name(self) -> int:
-        value = self.device_name.get().strip()
-        try:
-            name = int(value, 16) if value.lower().startswith("0x") else int(value)
-        except ValueError:
-            name = DEFAULT_SWITCH_DEVICE_NAME
         manufacturer = self._as_int(self.manufacturer_code.get(), DEFAULT_MANUFACTURER_CODE)
-        return set_name_manufacturer_code(name, manufacturer)
+        return set_name_manufacturer_code(DEFAULT_SWITCH_DEVICE_NAME, manufacturer)
 
     def _bank_instance(self) -> int:
         return max(0, min(255, self._as_int(self.bank_instance.get(), DEFAULT_SWITCH_BANK_INSTANCE)))
@@ -291,11 +205,13 @@ class BinarySwitchSimulatorApp:
         self._refresh_switch_button_labels()
 
     def resolve_dll_path(self) -> str:
-        path = self.dll_path.get().strip() or DEFAULT_DLL_NAME
-        return os.path.abspath(path)
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), DEFAULT_DLL_NAME)
 
     def connect(self) -> None:
+        if self.is_connected:
+            return
         if platform.system() != "Windows":
+            self.status_text.set("Status: Unsupported OS (Windows required for ECanVci.dll)")
             messagebox.showerror("Unsupported OS", "This simulator requires Windows because it loads ECanVci.dll.")
             return
         try:
@@ -311,20 +227,18 @@ class BinarySwitchSimulatorApp:
             self.device.open()
             self.is_connected = True
             self.status_text.set(f"Status: Connected ({config.dll_path})")
-            self._schedule_receive()
             self._send_address_claim()
             self._send_heartbeat()
+            self._schedule_receive()
             self._schedule_address_claim()
             self._schedule_heartbeat()
-            self.send_once()
         except Exception as exc:
             self.device = None
             self.is_connected = False
+            self.status_text.set(f"Status: Connection error ({exc})")
             messagebox.showerror("Connection error", str(exc))
-        self._update_button_states()
 
     def disconnect(self) -> None:
-        self.stop_periodic()
         self._stop_receive()
         self._stop_address_claim()
         self._stop_heartbeat()
@@ -337,7 +251,6 @@ class BinarySwitchSimulatorApp:
         self.device = None
         self.is_connected = False
         self.status_text.set("Status: Disconnected")
-        self._update_button_states()
 
     def _send_address_claim(self) -> None:
         if not self.device:
@@ -392,7 +305,7 @@ class BinarySwitchSimulatorApp:
 
     def _schedule_receive(self) -> None:
         if self.receive_job is None:
-            self.receive_job = self.root.after(50, self._receive_and_reschedule)
+            self.receive_job = self.root.after(RECEIVE_POLL_INTERVAL_MS, self._receive_and_reschedule)
 
     def _stop_receive(self) -> None:
         if self.receive_job is not None:
@@ -403,14 +316,14 @@ class BinarySwitchSimulatorApp:
         self.receive_job = None
         if self.device and self.is_connected:
             self._receive_protocol_messages()
-            self.receive_job = self.root.after(50, self._receive_and_reschedule)
+            self.receive_job = self.root.after(RECEIVE_POLL_INTERVAL_MS, self._receive_and_reschedule)
 
     def _receive_protocol_messages(self) -> None:
         if not self.device:
             return
         for frame_id, data in self.device.receive(max_frames=50, wait_time_ms=0):
             pgn = pgn_from_nmea2000_id(frame_id)
-            if pgn == PGN_BINARY_SWITCH_BANK_STATUS and self.receive_binary_switch_status_enabled.get():
+            if pgn == PGN_BINARY_SWITCH_BANK_STATUS:
                 self._apply_binary_switch_status(data)
             elif pgn == PGN_ADDRESS_CLAIM:
                 self._handle_address_claim(frame_id, data)
@@ -444,63 +357,6 @@ class BinarySwitchSimulatorApp:
                     changed = True
         if changed:
             self._refresh_switch_button_labels()
-
-    def _send_protocol_messages(self) -> None:
-        if not self.device:
-            return
-        for frame_id, data in self.current_frames():
-            self.device.send(frame_id, data)
-
-    def send_once(self) -> None:
-        self._send_protocol_messages()
-
-    def start_periodic(self) -> None:
-        if not self.device or self.send_job is not None:
-            return
-        self._schedule_send()
-        self._update_button_states()
-
-    def stop_periodic(self) -> None:
-        if self.send_job is not None:
-            self.root.after_cancel(self.send_job)
-            self.send_job = None
-        self._update_button_states()
-
-    def _schedule_send(self) -> None:
-        try:
-            interval = max(10, int(self.interval_ms.get()))
-        except tk.TclError:
-            interval = 100
-        self.send_job = self.root.after(interval, self._send_and_reschedule)
-
-    def _send_and_reschedule(self) -> None:
-        self._send_protocol_messages()
-        self._schedule_send()
-
-    def current_frames(self) -> list[tuple[int, bytes]]:
-        if not self.binary_switch_status_enabled.get():
-            return []
-        frame_id = nmea2000_id(3, PGN_BINARY_SWITCH_BANK_STATUS, self._source_address(), GLOBAL_DESTINATION)
-        payload = build_binary_switch_bank_status(self._bank_instance(), self.switch_states)
-        return [(frame_id, payload)]
-
-    def _update_button_states(self) -> None:
-        if self.is_connected:
-            self.connect_button.state(["disabled"])
-            self.disconnect_button.state(["!disabled"])
-            self.send_once_button.state(["!disabled"])
-            if self.send_job is None:
-                self.start_button.state(["!disabled"])
-                self.stop_button.state(["disabled"])
-            else:
-                self.start_button.state(["disabled"])
-                self.stop_button.state(["!disabled"])
-        else:
-            self.connect_button.state(["!disabled"])
-            self.disconnect_button.state(["disabled"])
-            self.send_once_button.state(["disabled"])
-            self.start_button.state(["disabled"])
-            self.stop_button.state(["disabled"])
 
 
 def main() -> None:
