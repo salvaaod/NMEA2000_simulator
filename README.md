@@ -62,7 +62,7 @@ If you only need binary switching simulation without the engine fields, run:
 python nmea2000_binary_switch_simulator.py
 ```
 
-This smaller program simulates one NMEA 2000 binary switch-bank node with 8 pushbuttons. It defaults to CAN address `55` and Azimut switch product identity values (`Azimut Switch`, application version `0.1`, database version `2000`, model version `SW1`, product code `1`, product ID `AZ_SW`). It can send address claim, product info, heartbeat, PGN 127501 Binary Switch Bank Status, and either PGN 126208 or PGN 127502 command frames on button press/release. It can also receive PGN 127501 for the selected bank instance and reflect the received switch states in the button labels.
+This smaller program simulates one NMEA 2000 binary switch-bank node with 8 pushbuttons. It defaults to CAN address `55` and bank instance `1`. It sends ISO Address Claim on connect, on simplified source-address conflict, and every 30 seconds; it sends Heartbeat every second. Switch clicks send only PGN 127502 Binary Switch Bank Control with the inverse of the last received status, and received PGN 127501 feedback latches the button labels.
 
 ### 2) Configure connection and node identity
 In the GUI, set at minimum:
@@ -81,15 +81,14 @@ You can also configure the virtual second node:
 - On success, status changes to connected and one transmit cycle is triggered.
 
 ### 4) Select what to transmit
-Use the **Enabled messages** checkboxes to include/exclude PGNs, including:
-- ISO Address Claim (60928)
-- ISO Request (59904)
-- Product Info (126996)
-- Heartbeat (126993)
-- Engine Rapid (127488)
-- Engine Dynamic (127489)
-- Binary Switch Bank Status (127501)
-- plus second-node variants for address claim/product/heartbeat
+In the full simulator, use the **Enabled messages** checkboxes to include/exclude PGNs such as address claim, product info, heartbeat, engine data, and binary switch status.
+
+In the standalone 8-switch simulator:
+- Address Claim (60928) is automatic on connect/conflict and every 30 seconds.
+- Heartbeat (126993) is automatic every second.
+- Binary Switch Bank Status (127501) can be sent at **Interval ms** when enabled.
+- Binary Switch Bank Status (127501) can also be received to latch button labels.
+- Button clicks send Binary Switch Bank Control (127502); PGN 126208 is not used.
 
 ### 5) Send data
 - **Send Once**: transmit one burst of currently enabled messages.
@@ -98,9 +97,10 @@ Use the **Enabled messages** checkboxes to include/exclude PGNs, including:
 - **Disconnect**: close the CAN device.
 
 ### 6) Use virtual switch buttons
-In **Binary Switch Bank (1-12 pushbuttons)**:
-- Pressing/releasing a switch button updates internal switch state.
-- Each press/release sends a control frame using the selected mode: simplified **PGN 126208 Command Group Function** by default, or **PGN 127502 Binary Switch Bank Control** when the 127502 checkbox is enabled.
+In **Binary Switch Bank**:
+- In the standalone 8-switch simulator, clicking a button sends **PGN 127502 Binary Switch Bank Control** with the inverse of that switch's last received status.
+- The GUI does not latch immediately from the click; it waits up to 200 ms for **PGN 127501 Binary Switch Bank Status** feedback for the selected bank instance.
+- Received feedback updates the button label to `ON`, `OFF`, `ERROR`, or `N/A`; if no feedback arrives within 200 ms, the pending label returns to the last received status.
 - Periodic status transmission can publish bank state via **PGN 127501**.
 
 ---
