@@ -12,6 +12,7 @@ from nmea2000_simulator import (
     PGN_ADDRESS_CLAIM,
     PGN_BINARY_SWITCH_BANK_STATUS,
     PGN_HEARTBEAT,
+    PGN_PRODUCT_INFO,
     TIMING0_250K,
     TIMING1_250K,
     DeviceConfig,
@@ -20,6 +21,7 @@ from nmea2000_simulator import (
     build_heartbeat_payload,
     nmea2000_id,
     set_name_manufacturer_code,
+    split_fast_packet,
 )
 
 SWITCH_COUNT = 6
@@ -28,10 +30,43 @@ DEFAULT_SWITCH_SOURCE_ADDRESS = 55
 DEFAULT_SWITCH_BANK_INSTANCE = 1
 DEFAULT_SWITCH_DEVICE_NAME = 0x1F2000AA12345678
 DEFAULT_MANUFACTURER_CODE = 176
+DEFAULT_PRODUCT_NAME = "Azimut Switch"
+DEFAULT_APPLICATION_VERSION = "0.1"
+DEFAULT_DATABASE_VERSION = 2000
+DEFAULT_MODEL_VERSION = "SW1"
+DEFAULT_PRODUCT_CODE = 1
+DEFAULT_PRODUCT_ID = "AZ_SW"
 ADDRESS_CLAIM_INTERVAL_MS = 30_000
 HEARTBEAT_INTERVAL_MS = 1_000
 RECEIVE_POLL_INTERVAL_MS = 50
 FEEDBACK_LATCH_TIMEOUT_MS = 200
+
+
+def _ascii_field(value: str, length: int = 32) -> bytes:
+    return value[:length].ljust(length, "\x00").encode("ascii", errors="ignore")
+
+
+def build_switch_product_info_payload(
+    product_name: str,
+    application_version: str,
+    database_version: int,
+    model_version: str,
+    product_code: int,
+    product_id: str,
+) -> bytes:
+    # PGN 126996 Product Information layout. Keep these fields in the secondary
+    # settings menu so the main switch panel stays compact.
+    database = int(max(0, min(0xFFFF, database_version))).to_bytes(2, byteorder="little", signed=False)
+    product_code_bytes = int(max(0, min(0xFFFF, product_code))).to_bytes(2, byteorder="little", signed=False)
+    return (
+        database
+        + product_code_bytes
+        + _ascii_field(product_id)
+        + _ascii_field(application_version)
+        + _ascii_field(model_version)
+        + _ascii_field(product_name)
+        + bytes((1, 1))
+    )
 
 
 def build_binary_switch_bank_control(bank_instance: int, switch_number: int, state_on: bool) -> bytes:
@@ -81,6 +116,7 @@ class BinarySwitchSimulatorApp:
         self.address_claim_job: str | None = None
         self.heartbeat_job: str | None = None
         self.is_connected = False
+        self.fast_packet_sequence = 0
         self.heartbeat_sequence = 0
         self.switch_states = [False] * SWITCH_COUNT
         self.switch_status_values = [0] * SWITCH_COUNT
@@ -90,6 +126,12 @@ class BinarySwitchSimulatorApp:
         self.source_address = tk.StringVar(value=str(DEFAULT_SWITCH_SOURCE_ADDRESS))
         self.bank_instance = tk.StringVar(value=str(DEFAULT_SWITCH_BANK_INSTANCE))
         self.manufacturer_code = tk.StringVar(value=str(DEFAULT_MANUFACTURER_CODE))
+        self.product_name = tk.StringVar(value=DEFAULT_PRODUCT_NAME)
+        self.application_version = tk.StringVar(value=DEFAULT_APPLICATION_VERSION)
+        self.database_version = tk.StringVar(value=str(DEFAULT_DATABASE_VERSION))
+        self.model_version = tk.StringVar(value=DEFAULT_MODEL_VERSION)
+        self.product_code = tk.StringVar(value=str(DEFAULT_PRODUCT_CODE))
+        self.product_id = tk.StringVar(value=DEFAULT_PRODUCT_ID)
         self._build_ui()
         self.root.after(100, self.connect)
 
@@ -136,10 +178,18 @@ class BinarySwitchSimulatorApp:
         self._add_setting_field(frame, 0, "CAN source address", self.source_address)
         self._add_setting_field(frame, 1, "Bank instance", self.bank_instance)
         self._add_setting_field(frame, 2, "Manufacturer code", self.manufacturer_code)
+
+        ttk.Separator(frame).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 6))
+        self._add_setting_field(frame, 4, "Product name", self.product_name)
+        self._add_setting_field(frame, 5, "Application version", self.application_version)
+        self._add_setting_field(frame, 6, "Database version", self.database_version)
+        self._add_setting_field(frame, 7, "Model version", self.model_version)
+        self._add_setting_field(frame, 8, "Product code", self.product_code)
+        self._add_setting_field(frame, 9, "Product ID", self.product_id)
         ttk.Label(frame, text="Settings affect subsequent frames; reconnect if hardware identity changes are required.").grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(8, 0)
+            row=10, column=0, columnspan=2, sticky="w", pady=(8, 0)
         )
-        ttk.Button(frame, text="Close", command=dialog.destroy).grid(row=4, column=0, columnspan=2, pady=(10, 0))
+        ttk.Button(frame, text="Close", command=dialog.destroy).grid(row=11, column=0, columnspan=2, pady=(10, 0))
 
     def _add_setting_field(self, parent: ttk.Frame, row: int, label: str, variable: tk.StringVar) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
@@ -228,6 +278,7 @@ class BinarySwitchSimulatorApp:
             self.is_connected = True
             self.status_text.set(f"Status: Connected ({config.dll_path})")
             self._send_address_claim()
+            self._send_product_info()
             self._send_heartbeat()
             self._schedule_receive()
             self._schedule_address_claim()
@@ -257,6 +308,23 @@ class BinarySwitchSimulatorApp:
             return
         frame_id = nmea2000_id(6, PGN_ADDRESS_CLAIM, self._source_address(), GLOBAL_DESTINATION)
         self.device.send(frame_id, build_address_claim(self._device_name()))
+
+    def _send_product_info(self) -> None:
+        if not self.device:
+            return
+        payload = build_switch_product_info_payload(
+            self.product_name.get(),
+            self.application_version.get(),
+            self._as_int(self.database_version.get(), DEFAULT_DATABASE_VERSION),
+            self.model_version.get(),
+            self._as_int(self.product_code.get(), DEFAULT_PRODUCT_CODE),
+            self.product_id.get(),
+        )
+        frame_id = nmea2000_id(6, PGN_PRODUCT_INFO, self._source_address(), GLOBAL_DESTINATION)
+        frames = split_fast_packet(payload, self.fast_packet_sequence)
+        self.fast_packet_sequence = (self.fast_packet_sequence + 1) & 0x07
+        for frame in frames:
+            self.device.send(frame_id, frame.ljust(8, b"\xFF"))
 
     def _schedule_address_claim(self) -> None:
         if self.address_claim_job is None:
