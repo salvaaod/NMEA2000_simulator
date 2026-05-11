@@ -48,51 +48,59 @@ Typical use cases:
 
 ## Usage
 
-### 1) Start the program
+### 1) Start the full engine/switch simulator
 From the repository directory:
 
 ```bash
 python nmea2000_simulator.py
 ```
 
-### 2) Configure connection and node identity
-In the GUI, set at minimum:
-- **DLL path**: path to `ECanVci.dll`.
-- **Source address**: primary simulated node address (0..251).
-- **Destination**: destination address for PDU1 messages (typically `255` for global).
-- **Engine instance** and optional identity/product fields.
+### Start the standalone 6-button switch simulator
+If you only need binary switching simulation without the engine fields, run:
 
-You can also configure the virtual second node:
-- switch node source address,
-- switch node NAME and manufacturer code,
-- switch product information.
+```bash
+python nmea2000_binary_switch_simulator.py
+```
+
+This smaller program simulates one NMEA 2000 binary switch-bank node with 6 large buttons laid out as 3 + 3. It defaults to CAN address `55` and bank instance `1`, loads `ECanVci.dll` from the application directory, and attempts to connect automatically at startup. It sends ISO Address Claim and Product Info on connect, re-sends Address Claim on simplified source-address conflict and every 30 seconds, and sends Heartbeat every second. Switch clicks send only PGN 127502 Binary Switch Bank Control with the inverse of the last received PGN 127501 status, and received PGN 127501 feedback latches the button labels.
+
+### 2) Configure connection and node identity
+In the full simulator GUI, set the DLL path, source/destination addresses, engine instance, and optional identity/product fields. You can also configure the virtual second switch node.
+
+In the standalone 6-button switch simulator, the DLL path is internal and points to `ECanVci.dll` next to the application file. Source address, bank instance, manufacturer code, and Product Info fields are available from **Settings → Node settings...**.
 
 ### 3) Connect to CAN device
-- Click **Connect**.
-- On success, status changes to connected and one transmit cycle is triggered.
+- In the full simulator, click **Connect**.
+- In the standalone 6-button switch simulator, connection is attempted automatically at startup; use **Settings → Retry connection** only if the first attempt fails.
+- On success, status changes to connected and startup traffic is triggered.
 
 ### 4) Select what to transmit
-Use the **Enabled messages** checkboxes to include/exclude PGNs, including:
-- ISO Address Claim (60928)
-- ISO Request (59904)
-- Product Info (126996)
-- Heartbeat (126993)
-- Engine Rapid (127488)
-- Engine Dynamic (127489)
-- Binary Switch Bank Status (127501)
-- plus second-node variants for address claim/product/heartbeat
+In the full simulator, use the **Enabled messages** checkboxes to include/exclude PGNs such as address claim, product info, heartbeat, engine data, and binary switch status.
+
+In the standalone 6-button switch simulator:
+- Connection is attempted automatically at startup using `ECanVci.dll` from the application directory.
+- Address Claim (60928) is automatic on connect/conflict and every 30 seconds.
+- Product Info (126996) is sent on connect with values from the settings menu.
+- Heartbeat (126993) is automatic every second.
+- Binary Switch Bank Status (127501) is received to latch button labels.
+- Button clicks send Binary Switch Bank Control (127502); PGN 126208 is not used.
+- Node settings such as source address, bank instance, manufacturer code, and product identity are available from the **Settings** menu instead of the main screen.
 
 ### 5) Send data
+In the full simulator:
 - **Send Once**: transmit one burst of currently enabled messages.
 - **Start Periodic**: keep transmitting at **Interval ms**.
 - **Stop Periodic**: stop scheduled periodic transmission.
 - **Disconnect**: close the CAN device.
 
+In the standalone 6-button switch simulator, no send/start controls are required; it connects automatically and sends heartbeat/address-claim traffic plus PGN 127502 switch commands on clicks.
+
 ### 6) Use virtual switch buttons
-In **Binary Switch Bank (1-12 pushbuttons)**:
-- Pressing/releasing a switch button updates internal switch state.
-- Each press/release sends a simplified **PGN 126208 Command Group Function** control frame.
-- Periodic status transmission can publish bank state via **PGN 127501**.
+In **Binary Switch Bank**:
+- In the standalone 6-button simulator, clicking a button sends **PGN 127502 Binary Switch Bank Control** with the inverse of that switch's last received status.
+- The GUI does not latch immediately from the click; it waits up to 200 ms for **PGN 127501 Binary Switch Bank Status** feedback for the selected bank instance.
+- Received feedback updates the button label to `ON`, `OFF`, `ERROR`, or `N/A`; `ON` buttons are shown in green. If no feedback arrives within 200 ms, the button remains at the last received status.
+- The standalone simulator does not require Start Periodic; heartbeat, address claim, receive polling, and switch commands are automatic after startup connection.
 
 ---
 
@@ -134,7 +142,7 @@ This style is deliberate: comments are focused on non-obvious protocol details r
 
 - Not a full standards-conformance test suite for all NMEA 2000 PGNs.
 - Product info and group-function handling are simplified for simulation practicality.
-- No receive/decode path in this tool: it is transmit-focused.
+- The full engine simulator is transmit-focused; the standalone 6-button switch simulator also receives PGN 127501 to update its button labels.
 - Requires Windows because of direct DLL loading via `ctypes.WinDLL`.
 
 ---
