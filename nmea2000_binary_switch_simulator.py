@@ -86,16 +86,39 @@ def build_binary_switch_bank_control(bank_instance: int, switch_number: int, sta
     return bytes((bank_instance & 0xFF,)) + bytes(packed_states)
 
 
+def pgn_from_nmea2000_id(frame_id: int) -> int:
+    pf = (frame_id >> 16) & 0xFF
+    ps = (frame_id >> 8) & 0xFF
+    data_page = (frame_id >> 24) & 0x01
+    if pf < 240:
+        return (data_page << 16) | (pf << 8)
+    return (data_page << 16) | (pf << 8) | ps
+
+
+def decode_binary_switch_bank_status(data: bytes, switch_count: int = SWITCH_COUNT) -> tuple[int, list[int]] | None:
+    if len(data) < 8:
+        return None
+    bank_instance = data[0]
+    states: list[int] = []
+    packed = data[1:8]
+    for index in range(min(28, switch_count)):
+        bit_pos = index * 2
+        states.append((packed[bit_pos // 8] >> (bit_pos % 8)) & 0x03)
+    return bank_instance, states
+
+
 class BinarySwitchSimulatorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("NMEA2000 Binary Switch Simulator (8 switches)")
         self.device: USBCANDevice | None = None
         self.send_job: str | None = None
+        self.receive_job: str | None = None
         self.is_connected = False
         self.fast_packet_sequence = 0
         self.heartbeat_sequence = 0
         self.switch_states = [False] * SWITCH_COUNT
+        self.switch_status_values = [0] * SWITCH_COUNT
         self.switch_buttons: list[ttk.Button] = []
         self._build_ui()
 
@@ -155,6 +178,7 @@ class BinarySwitchSimulatorApp:
         self.product_info_enabled = tk.BooleanVar(value=True)
         self.heartbeat_enabled = tk.BooleanVar(value=True)
         self.binary_switch_status_enabled = tk.BooleanVar(value=True)
+        self.receive_binary_switch_status_enabled = tk.BooleanVar(value=True)
         self.send_switch_commands_via_127502 = tk.BooleanVar(value=False)
         ttk.Checkbutton(enabled, text="ISO Address Claim (60928)", variable=self.address_claim_enabled).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(enabled, text="Product Info (126996)", variable=self.product_info_enabled).grid(row=0, column=1, sticky="w")
@@ -163,14 +187,17 @@ class BinarySwitchSimulatorApp:
             row=1, column=1, sticky="w"
         )
         ttk.Checkbutton(
+            enabled, text="Receive Binary Switch Bank Status (127501)", variable=self.receive_binary_switch_status_enabled
+        ).grid(row=2, column=0, sticky="w")
+        ttk.Checkbutton(
             enabled,
             text="Send button commands via PGN 127502 instead of PGN 126208",
             variable=self.send_switch_commands_via_127502,
-        ).grid(row=2, column=0, columnspan=2, sticky="w")
+        ).grid(row=2, column=1, columnspan=2, sticky="w")
 
         switch_frame = ttk.LabelFrame(main, text="Binary Switch Bank (8 pushbuttons)", padding=8)
         switch_frame.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 6))
-        ttk.Label(switch_frame, text="Press/release updates PGN 127501 status and sends the selected command PGN.").grid(
+        ttk.Label(switch_frame, text="Press/release sends the selected command PGN; received PGN 127501 updates labels.").grid(
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 4)
         )
         for index in range(SWITCH_COUNT):
@@ -230,9 +257,10 @@ class BinarySwitchSimulatorApp:
         return max(0, min(255, self._as_int(self.bank_instance.get(), DEFAULT_SWITCH_BANK_INSTANCE)))
 
     def _refresh_switch_button_labels(self) -> None:
+        state_labels = {0: "OFF", 1: "ON", 2: "ERROR", 3: "N/A"}
         for index, button in enumerate(self.switch_buttons, start=1):
-            state_text = "PRESSED" if self.switch_states[index - 1] else "RELEASED"
-            button.configure(text=f"SW {index}: {state_text}")
+            status = self.switch_status_values[index - 1]
+            button.configure(text=f"SW {index}: {state_labels.get(status, 'N/A')}")
 
     def _send_switch_command(self, switch_number: int, state_on: bool) -> None:
         if not self.device:
@@ -250,6 +278,7 @@ class BinarySwitchSimulatorApp:
         if self.switch_states[switch_index]:
             return
         self.switch_states[switch_index] = True
+        self.switch_status_values[switch_index] = 1
         self._refresh_switch_button_labels()
         self._send_switch_command(switch_number, True)
 
@@ -258,6 +287,7 @@ class BinarySwitchSimulatorApp:
         if not self.switch_states[switch_index]:
             return
         self.switch_states[switch_index] = False
+        self.switch_status_values[switch_index] = 0
         self._refresh_switch_button_labels()
         self._send_switch_command(switch_number, False)
 
@@ -282,6 +312,7 @@ class BinarySwitchSimulatorApp:
             self.device.open()
             self.is_connected = True
             self.status_text.set(f"Status: Connected ({config.dll_path})")
+            self._schedule_receive()
             self.send_once()
         except Exception as exc:
             self.device = None
@@ -291,6 +322,7 @@ class BinarySwitchSimulatorApp:
 
     def disconnect(self) -> None:
         self.stop_periodic()
+        self._stop_receive()
         if self.device:
             try:
                 self.device.close()
@@ -300,6 +332,45 @@ class BinarySwitchSimulatorApp:
         self.is_connected = False
         self.status_text.set("Status: Disconnected")
         self._update_button_states()
+
+    def _schedule_receive(self) -> None:
+        if self.receive_job is None:
+            self.receive_job = self.root.after(50, self._receive_and_reschedule)
+
+    def _stop_receive(self) -> None:
+        if self.receive_job is not None:
+            self.root.after_cancel(self.receive_job)
+            self.receive_job = None
+
+    def _receive_and_reschedule(self) -> None:
+        self.receive_job = None
+        if self.device and self.is_connected:
+            self._receive_protocol_messages()
+            self.receive_job = self.root.after(50, self._receive_and_reschedule)
+
+    def _receive_protocol_messages(self) -> None:
+        if not self.device or not self.receive_binary_switch_status_enabled.get():
+            return
+        for frame_id, data in self.device.receive(max_frames=50, wait_time_ms=0):
+            if pgn_from_nmea2000_id(frame_id) == PGN_BINARY_SWITCH_BANK_STATUS:
+                self._apply_binary_switch_status(data)
+
+    def _apply_binary_switch_status(self, data: bytes) -> None:
+        decoded = decode_binary_switch_bank_status(data, SWITCH_COUNT)
+        if decoded is None:
+            return
+        bank_instance, states = decoded
+        if bank_instance != self._bank_instance():
+            return
+        changed = False
+        for index, status in enumerate(states):
+            if status != self.switch_status_values[index]:
+                self.switch_status_values[index] = status
+                changed = True
+            if status in (0, 1):
+                self.switch_states[index] = status == 1
+        if changed:
+            self._refresh_switch_button_labels()
 
     def _send_protocol_messages(self) -> None:
         if not self.device:

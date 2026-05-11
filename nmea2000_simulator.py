@@ -95,6 +95,15 @@ class USBCANDevice:
             ctypes.c_ulong,
         ]
         self.dll.Transmit.restype = ctypes.c_ulong
+        self.dll.Receive.argtypes = [
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.POINTER(CAN_OBJ),
+            ctypes.c_ulong,
+            ctypes.c_int,
+        ]
+        self.dll.Receive.restype = ctypes.c_ulong
 
     def open(self) -> None:
         result = self.dll.OpenDevice(self.config.device_type, self.config.device_index, 0)
@@ -142,6 +151,28 @@ class USBCANDevice:
                 1,
             )
         )
+
+    def receive(self, max_frames: int = 50, wait_time_ms: int = 0) -> list[tuple[int, bytes]]:
+        frame_count = max(1, int(max_frames))
+        receive_buffer = (CAN_OBJ * frame_count)()
+        received = int(
+            self.dll.Receive(
+                self.config.device_type,
+                self.config.device_index,
+                self.config.can_index,
+                receive_buffer,
+                frame_count,
+                max(0, int(wait_time_ms)),
+            )
+        )
+        if received <= 0 or received > frame_count:
+            return []
+        frames: list[tuple[int, bytes]] = []
+        for index in range(received):
+            can_obj = receive_buffer[index]
+            data_len = max(0, min(8, int(can_obj.DataLen)))
+            frames.append((int(can_obj.ID), bytes(can_obj.Data[:data_len])))
+        return frames
 
 
 def nmea2000_id(priority: int, pgn: int, source_address: int, destination: int = GLOBAL_DESTINATION) -> int:
