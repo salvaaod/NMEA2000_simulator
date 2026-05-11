@@ -38,7 +38,7 @@ DEFAULT_PRODUCT_NAME = "Azimut Switch"
 DEFAULT_APPLICATION_VERSION = "0.1"
 DEFAULT_DATABASE_VERSION = 2000
 DEFAULT_MODEL_VERSION = "SW1"
-DEFAULT_PRODUCT_CODE = "AZM_SW_SF"
+DEFAULT_PRODUCT_CODE = 1
 DEFAULT_PRODUCT_ID = "AZ_SW"
 
 
@@ -51,20 +51,22 @@ def build_switch_product_info_payload(
     application_version: str,
     database_version: int,
     model_version: str,
-    product_code: str,
+    product_code: int,
     product_id: str,
 ) -> bytes:
-    # Simplified product information payload for the switch-only simulator.
-    # The first two bytes keep the existing NMEA database/version position;
-    # the following ASCII fields carry Azimut's requested product identity.
+    # PGN 126996 Product Information layout:
+    # NMEA/database version (uint16), product code (uint16), product/model ID (32 ASCII),
+    # software/application version (32 ASCII), model version (32 ASCII), serial/product name (32 ASCII),
+    # certification level (uint8), and load equivalency (uint8).
     database = int(max(0, min(0xFFFF, database_version))).to_bytes(2, byteorder="little", signed=False)
+    product_code_bytes = int(max(0, min(0xFFFF, product_code))).to_bytes(2, byteorder="little", signed=False)
     return (
         database
-        + _ascii_field(product_code)
-        + _ascii_field(product_name)
+        + product_code_bytes
+        + _ascii_field(product_id)
         + _ascii_field(application_version)
         + _ascii_field(model_version)
-        + _ascii_field(product_id)
+        + _ascii_field(product_name)
         + bytes((1, 1))
     )
 
@@ -129,7 +131,7 @@ class BinarySwitchSimulatorApp:
         self.application_version = self._add_field(product, 0, "Application version", DEFAULT_APPLICATION_VERSION, col=2)
         self.database_version = self._add_field(product, 1, "Database version", str(DEFAULT_DATABASE_VERSION), col=0)
         self.model_version = self._add_field(product, 1, "Model version", DEFAULT_MODEL_VERSION, col=2)
-        self.product_code = self._add_field(product, 2, "Product code", DEFAULT_PRODUCT_CODE, col=0)
+        self.product_code = self._add_field(product, 2, "Product code", str(DEFAULT_PRODUCT_CODE), col=0)
         self.product_id = self._add_field(product, 2, "Product ID", DEFAULT_PRODUCT_ID, col=2)
 
         enabled = ttk.LabelFrame(main, text="Enabled messages", padding=8)
@@ -326,7 +328,7 @@ class BinarySwitchSimulatorApp:
                 self.application_version.get(),
                 self._as_int(self.database_version.get(), DEFAULT_DATABASE_VERSION),
                 self.model_version.get(),
-                self.product_code.get(),
+                self._as_int(self.product_code.get(), DEFAULT_PRODUCT_CODE),
                 self.product_id.get(),
             )
             messages.append(ProtocolMessage(PGN_PRODUCT_INFO, payload, 6, GLOBAL_DESTINATION))
