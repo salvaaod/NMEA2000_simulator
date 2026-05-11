@@ -30,6 +30,7 @@ from nmea2000_simulator import (
 )
 
 SWITCH_COUNT = 8
+PGN_BINARY_SWITCH_BANK_CONTROL = 127502
 DEFAULT_SWITCH_SOURCE_ADDRESS = 55
 DEFAULT_SWITCH_BANK_INSTANCE = 1
 DEFAULT_SWITCH_DEVICE_NAME = 0x1F2000AA12345678
@@ -69,6 +70,20 @@ def build_switch_product_info_payload(
         + _ascii_field(product_name)
         + bytes((1, 1))
     )
+
+
+def build_binary_switch_bank_control(bank_instance: int, switch_number: int, state_on: bool) -> bytes:
+    # PGN 127502 Binary Switch Bank Control uses the same 2-bit switch field packing
+    # as PGN 127501. For a momentary button event, command only the changed switch
+    # and mark every other switch as unavailable/no command.
+    switch_commands = [3] * 28
+    switch_index = max(1, min(SWITCH_COUNT, switch_number)) - 1
+    switch_commands[switch_index] = 1 if state_on else 0
+    packed_states = bytearray((0x00,) * 7)
+    for index, value in enumerate(switch_commands):
+        bit_pos = index * 2
+        packed_states[bit_pos // 8] |= (value & 0x03) << (bit_pos % 8)
+    return bytes((bank_instance & 0xFF,)) + bytes(packed_states)
 
 
 class BinarySwitchSimulatorApp:
@@ -140,16 +155,22 @@ class BinarySwitchSimulatorApp:
         self.product_info_enabled = tk.BooleanVar(value=True)
         self.heartbeat_enabled = tk.BooleanVar(value=True)
         self.binary_switch_status_enabled = tk.BooleanVar(value=True)
+        self.send_switch_commands_via_127502 = tk.BooleanVar(value=False)
         ttk.Checkbutton(enabled, text="ISO Address Claim (60928)", variable=self.address_claim_enabled).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(enabled, text="Product Info (126996)", variable=self.product_info_enabled).grid(row=0, column=1, sticky="w")
         ttk.Checkbutton(enabled, text="Heartbeat (126993)", variable=self.heartbeat_enabled).grid(row=1, column=0, sticky="w")
         ttk.Checkbutton(enabled, text="Binary Switch Bank Status (127501)", variable=self.binary_switch_status_enabled).grid(
             row=1, column=1, sticky="w"
         )
+        ttk.Checkbutton(
+            enabled,
+            text="Send button commands via PGN 127502 instead of PGN 126208",
+            variable=self.send_switch_commands_via_127502,
+        ).grid(row=2, column=0, columnspan=2, sticky="w")
 
         switch_frame = ttk.LabelFrame(main, text="Binary Switch Bank (8 pushbuttons)", padding=8)
         switch_frame.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 6))
-        ttk.Label(switch_frame, text="Press/release sends PGN 126208 command and updates PGN 127501 status.").grid(
+        ttk.Label(switch_frame, text="Press/release updates PGN 127501 status and sends the selected command PGN.").grid(
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 4)
         )
         for index in range(SWITCH_COUNT):
@@ -216,8 +237,12 @@ class BinarySwitchSimulatorApp:
     def _send_switch_command(self, switch_number: int, state_on: bool) -> None:
         if not self.device:
             return
-        payload = build_group_function_binary_switch_command(self._bank_instance(), switch_number, state_on)
-        frame_id = nmea2000_id(DEFAULT_PRIORITY, PGN_GROUP_FUNCTION, self._source_address(), self._destination())
+        if self.send_switch_commands_via_127502.get():
+            payload = build_binary_switch_bank_control(self._bank_instance(), switch_number, state_on)
+            frame_id = nmea2000_id(3, PGN_BINARY_SWITCH_BANK_CONTROL, self._source_address(), GLOBAL_DESTINATION)
+        else:
+            payload = build_group_function_binary_switch_command(self._bank_instance(), switch_number, state_on)
+            frame_id = nmea2000_id(DEFAULT_PRIORITY, PGN_GROUP_FUNCTION, self._source_address(), self._destination())
         self.device.send(frame_id, payload)
 
     def on_switch_press(self, switch_number: int) -> None:
