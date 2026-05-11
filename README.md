@@ -62,7 +62,7 @@ If you only need binary switching simulation without the engine fields, run:
 python nmea2000_binary_switch_simulator.py
 ```
 
-This smaller program simulates one NMEA 2000 binary switch-bank node with 8 pushbuttons. It can send address claim, product info, heartbeat, PGN 127501 Binary Switch Bank Status, and PGN 126208 command frames on button press/release.
+This smaller program simulates one NMEA 2000 binary switch-bank node with 8 pushbuttons. It defaults to CAN address `55` and Azimut switch product identity values (`Azimut Switch`, application version `0.1`, database version `2000`, model version `SW1`, product code `AZM_SW_SF`, product ID `AZ_SW`). It can send address claim, product info, heartbeat, PGN 127501 Binary Switch Bank Status, and PGN 126208 command frames on button press/release.
 
 ### 2) Configure connection and node identity
 In the GUI, set at minimum:

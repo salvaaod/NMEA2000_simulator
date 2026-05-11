@@ -24,17 +24,49 @@ from nmea2000_simulator import (
     build_binary_switch_bank_status,
     build_group_function_binary_switch_command,
     build_heartbeat_payload,
-    build_product_info_payload,
     nmea2000_id,
     set_name_manufacturer_code,
     split_fast_packet,
 )
 
 SWITCH_COUNT = 8
-DEFAULT_SWITCH_SOURCE_ADDRESS = 100
+DEFAULT_SWITCH_SOURCE_ADDRESS = 55
 DEFAULT_SWITCH_BANK_INSTANCE = 52
 DEFAULT_SWITCH_DEVICE_NAME = 0x1F2000AA12345678
 DEFAULT_MANUFACTURER_CODE = 176
+DEFAULT_PRODUCT_NAME = "Azimut Switch"
+DEFAULT_APPLICATION_VERSION = "0.1"
+DEFAULT_DATABASE_VERSION = 2000
+DEFAULT_MODEL_VERSION = "SW1"
+DEFAULT_PRODUCT_CODE = "AZM_SW_SF"
+DEFAULT_PRODUCT_ID = "AZ_SW"
+
+
+def _ascii_field(value: str, length: int = 32) -> bytes:
+    return value[:length].ljust(length, "\x00").encode("ascii", errors="ignore")
+
+
+def build_switch_product_info_payload(
+    product_name: str,
+    application_version: str,
+    database_version: int,
+    model_version: str,
+    product_code: str,
+    product_id: str,
+) -> bytes:
+    # Simplified product information payload for the switch-only simulator.
+    # The first two bytes keep the existing NMEA database/version position;
+    # the following ASCII fields carry Azimut's requested product identity.
+    database = int(max(0, min(0xFFFF, database_version))).to_bytes(2, byteorder="little", signed=False)
+    return (
+        database
+        + _ascii_field(product_code)
+        + _ascii_field(product_name)
+        + _ascii_field(application_version)
+        + _ascii_field(model_version)
+        + _ascii_field(product_id)
+        + bytes((1, 1))
+    )
 
 
 class BinarySwitchSimulatorApp:
@@ -93,10 +125,12 @@ class BinarySwitchSimulatorApp:
         product.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 6))
         product.columnconfigure(1, weight=1)
         product.columnconfigure(3, weight=1)
-        self.product_model = self._add_field(product, 0, "Model", "8 Switch Bank", col=0)
-        self.software_version = self._add_field(product, 0, "Software", "1.0.0", col=2)
-        self.model_version = self._add_field(product, 1, "Model version", "Rev A", col=0)
-        self.serial_code = self._add_field(product, 1, "Serial", "SW8-0001", col=2)
+        self.product_name = self._add_field(product, 0, "Device/Product name", DEFAULT_PRODUCT_NAME, col=0)
+        self.application_version = self._add_field(product, 0, "Application version", DEFAULT_APPLICATION_VERSION, col=2)
+        self.database_version = self._add_field(product, 1, "Database version", str(DEFAULT_DATABASE_VERSION), col=0)
+        self.model_version = self._add_field(product, 1, "Model version", DEFAULT_MODEL_VERSION, col=2)
+        self.product_code = self._add_field(product, 2, "Product code", DEFAULT_PRODUCT_CODE, col=0)
+        self.product_id = self._add_field(product, 2, "Product ID", DEFAULT_PRODUCT_ID, col=2)
 
         enabled = ttk.LabelFrame(main, text="Enabled messages", padding=8)
         enabled.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(4, 6))
@@ -287,11 +321,13 @@ class BinarySwitchSimulatorApp:
         if self.address_claim_enabled.get():
             messages.append(ProtocolMessage(PGN_ADDRESS_CLAIM, build_address_claim(self._device_name()), 6, GLOBAL_DESTINATION))
         if self.product_info_enabled.get():
-            payload = build_product_info_payload(
-                self.product_model.get(),
-                self.software_version.get(),
+            payload = build_switch_product_info_payload(
+                self.product_name.get(),
+                self.application_version.get(),
+                self._as_int(self.database_version.get(), DEFAULT_DATABASE_VERSION),
                 self.model_version.get(),
-                self.serial_code.get(),
+                self.product_code.get(),
+                self.product_id.get(),
             )
             messages.append(ProtocolMessage(PGN_PRODUCT_INFO, payload, 6, GLOBAL_DESTINATION))
         if self.heartbeat_enabled.get():
