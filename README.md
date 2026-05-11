@@ -62,7 +62,7 @@ If you only need binary switching simulation without the engine fields, run:
 python nmea2000_binary_switch_simulator.py
 ```
 
-This smaller program simulates one NMEA 2000 binary switch-bank node with 6 buttons laid out as 3 + 3. It defaults to CAN address `55` and bank instance `1`, loads `ECanVci.dll` from the application directory, and attempts to connect automatically at startup. It sends ISO Address Claim and Product Info on connect, re-sends Address Claim on simplified source-address conflict and every 30 seconds, and sends Heartbeat every second. Switch clicks send only PGN 127502 Binary Switch Bank Control with the inverse of the last received PGN 127501 status, and received PGN 127501 feedback latches the button labels.
+This smaller program simulates one NMEA 2000 binary switch-bank node with 6 large buttons laid out as 3 + 3. It defaults to CAN address `55` and bank instance `1`, loads `ECanVci.dll` from the application directory, and attempts to connect automatically at startup. It sends ISO Address Claim and Product Info on connect, re-sends Address Claim on simplified source-address conflict and every 30 seconds, and sends Heartbeat every second. Switch clicks send only PGN 127502 Binary Switch Bank Control with the inverse of the last received PGN 127501 status, and received PGN 127501 feedback latches the button labels.
 
 ### 2) Configure connection and node identity
 In the full simulator GUI, set the DLL path, source/destination addresses, engine instance, and optional identity/product fields. You can also configure the virtual second switch node.
@@ -99,7 +99,7 @@ In the standalone 6-button switch simulator, no send/start controls are required
 In **Binary Switch Bank**:
 - In the standalone 6-button simulator, clicking a button sends **PGN 127502 Binary Switch Bank Control** with the inverse of that switch's last received status.
 - The GUI does not latch immediately from the click; it waits up to 200 ms for **PGN 127501 Binary Switch Bank Status** feedback for the selected bank instance.
-- Received feedback updates the button label to `ON`, `OFF`, `ERROR`, or `N/A`; if no feedback arrives within 200 ms, the pending label returns to the last received status.
+- Received feedback updates the button label to `ON`, `OFF`, `ERROR`, or `N/A`; `ON` buttons are shown in green. If no feedback arrives within 200 ms, the button remains at the last received status.
 - The standalone simulator does not require Start Periodic; heartbeat, address claim, receive polling, and switch commands are automatic after startup connection.
 
 ---

@@ -122,7 +122,7 @@ class BinarySwitchSimulatorApp:
         self.switch_status_values = [0] * SWITCH_COUNT
         self.pending_switch_targets: list[int | None] = [None] * SWITCH_COUNT
         self.pending_feedback_jobs: list[str | None] = [None] * SWITCH_COUNT
-        self.switch_buttons: list[ttk.Button] = []
+        self.switch_buttons: list[tk.Button] = []
         self.source_address = tk.StringVar(value=str(DEFAULT_SWITCH_SOURCE_ADDRESS))
         self.bank_instance = tk.StringVar(value=str(DEFAULT_SWITCH_BANK_INSTANCE))
         self.manufacturer_code = tk.StringVar(value=str(DEFAULT_MANUFACTURER_CODE))
@@ -144,17 +144,21 @@ class BinarySwitchSimulatorApp:
         for column in range(3):
             main.columnconfigure(column, weight=1)
 
-        self.status_text = tk.StringVar(value="Status: Starting...")
-        ttk.Label(main, textvariable=self.status_text).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
-
-        ttk.Label(
-            main,
-            text="Click a switch to send PGN 127502 with the inverse of the last received PGN 127501 status.",
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        self.status_text = tk.StringVar(value="")
 
         for index in range(SWITCH_COUNT):
-            button = ttk.Button(main, text=f"SW {index + 1}: OFF", width=18, command=lambda switch_no=index + 1: self.on_switch_click(switch_no))
-            button.grid(row=2 + (index // 3), column=index % 3, padx=4, pady=4, sticky="ew")
+            button = tk.Button(
+                main,
+                text=f"SW {index + 1}\nOFF",
+                width=18,
+                height=3,
+                command=lambda switch_no=index + 1: self.on_switch_click(switch_no),
+                bg="#d9d9d9",
+                activebackground="#c8c8c8",
+                relief="raised",
+                font=("TkDefaultFont", 11, "bold"),
+            )
+            button.grid(row=index // 3, column=index % 3, padx=5, pady=5, sticky="nsew")
             self.switch_buttons.append(button)
         self._refresh_switch_button_labels()
 
@@ -215,14 +219,21 @@ class BinarySwitchSimulatorApp:
         return max(0, min(255, self._as_int(self.bank_instance.get(), DEFAULT_SWITCH_BANK_INSTANCE)))
 
     def _refresh_switch_button_labels(self) -> None:
-        state_labels = {0: "OFF", 1: "ON", 2: "ERROR", 3: "N/A"}
+        state_styles = {
+            0: ("OFF", "#d9d9d9", "#c8c8c8"),
+            1: ("ON", "#2fb344", "#27963a"),
+            2: ("ERROR", "#f0ad4e", "#d99632"),
+            3: ("N/A", "#bfbfbf", "#a8a8a8"),
+        }
         for index, button in enumerate(self.switch_buttons, start=1):
-            pending_target = self.pending_switch_targets[index - 1]
-            if pending_target is None:
-                state_text = state_labels.get(self.switch_status_values[index - 1], "N/A")
-            else:
-                state_text = f"PENDING {'ON' if pending_target else 'OFF'}"
-            button.configure(text=f"SW {index}: {state_text}")
+            state_text, background, active_background = state_styles.get(self.switch_status_values[index - 1], state_styles[3])
+            button.configure(
+                text=f"SW {index}\n{state_text}",
+                bg=background,
+                activebackground=active_background,
+                fg="white" if self.switch_status_values[index - 1] == 1 else "black",
+                activeforeground="white" if self.switch_status_values[index - 1] == 1 else "black",
+            )
 
     def _send_switch_command(self, switch_number: int, state_on: bool) -> None:
         if not self.device:
@@ -236,7 +247,6 @@ class BinarySwitchSimulatorApp:
         current_status = self.switch_status_values[switch_index]
         target_status = 0 if current_status == 1 else 1
         self.pending_switch_targets[switch_index] = target_status
-        self._refresh_switch_button_labels()
         self._send_switch_command(switch_number, target_status == 1)
         self._schedule_feedback_timeout(switch_index)
 
@@ -261,7 +271,7 @@ class BinarySwitchSimulatorApp:
         if self.is_connected:
             return
         if platform.system() != "Windows":
-            self.status_text.set("Status: Unsupported OS (Windows required for ECanVci.dll)")
+            self.status_text.set("")
             messagebox.showerror("Unsupported OS", "This simulator requires Windows because it loads ECanVci.dll.")
             return
         try:
@@ -276,7 +286,7 @@ class BinarySwitchSimulatorApp:
             self.device = USBCANDevice(config)
             self.device.open()
             self.is_connected = True
-            self.status_text.set(f"Status: Connected ({config.dll_path})")
+            self.status_text.set("")
             self._send_address_claim()
             self._send_product_info()
             self._send_heartbeat()
@@ -286,7 +296,7 @@ class BinarySwitchSimulatorApp:
         except Exception as exc:
             self.device = None
             self.is_connected = False
-            self.status_text.set(f"Status: Connection error ({exc})")
+            self.status_text.set("")
             messagebox.showerror("Connection error", str(exc))
 
     def disconnect(self) -> None:
@@ -301,7 +311,7 @@ class BinarySwitchSimulatorApp:
                 pass
         self.device = None
         self.is_connected = False
-        self.status_text.set("Status: Disconnected")
+        self.status_text.set("")
 
     def _send_address_claim(self) -> None:
         if not self.device:
